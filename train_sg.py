@@ -49,15 +49,15 @@ def randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, 
 
 wandb.init(project="scenegraphgeneration")
 
-root_data_dir = "/home/jack/research/data/sg_data_gt"
+root_data_dir = "/mmfs1/home/jrl712/amazon_home/data/sg_data_gt"
 dataset = SceneGraphDataset(root_data_dir)
-train_dataloader = DataLoader(dataset, batch_size=2, shuffle=True)
+train_dataloader = DataLoader(dataset, batch_size=64a, shuffle=True)
 
 device = torch.device("cuda:0")
 
 training_iterations = 1000
 
-model = FullSceneGraphModel(10).to(device)
+model = FullSceneGraphModel(10, dataset.).to(device)
 
 visible_loss_metric = nn.CrossEntropyLoss()
 pos_loss_metric= nn.MSELoss()

@@ -1,0 +1,23 @@
+#!/bin/bash
+
+#SBATCH --job-name=train_stow_sggen
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=jrl712@uw.edu
+
+#SBATCH --account=sciencehub
+#SBATCH --partition=ckpt
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --mem=64G
+#SBATCH --gpus=a40:1
+#SBATCH --time=00-08:00:00 # Max runtime in DD-HH:MM:SS format.
+
+#SBATCH --chdir=/mmfs1/home/jrl712
+#SBATCH --export=all
+#SBATCH --output=/mmfs1/home/jrl712/amazon_home/scene_graph/spatio-temporal-scene-graph/logs/stdout.txt # where STDOUT goes
+#SBATCH --error=/mmfs1/home/jrl712/amazon_home/scene_graph/spatio-temporal-scene-graph/logs/stderr.txt # where STDERR goes
+
+# Modules to use (optional).
+
+# Your programs to run.
+apptainer exec --nv --overlay /gscratch/sciencehub/jrl712/conda_overlay3.img:ro /gscratch/sciencehub/jrl712/hyak-container.sif /mmfs1/home/jrl712/amazon_home/scene_graph/spatio-temporal-scene-graph/train_stow.sh $1
