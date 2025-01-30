@@ -1,0 +1,9 @@
+use_node_class_weights: False
+multi_gpu: False
+
+network_config: 
+  num_lstm_layers: 3
+  latent_size: 512
+  dropout: 0.2
+  encoder_model: "lstm"
+  feature_extractor: "dino"
