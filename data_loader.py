@@ -239,6 +239,7 @@ class VisualGenomeDataset(Dataset):
         }
         return return_data
                 
+
 class StowDataset(Dataset):
  
     def __init__(self, root_dir, num_objects, scale_factor=1, transform=None):
@@ -404,3 +405,179 @@ class StowDataset(Dataset):
         }
         return return_data
                 
+
+class IsaacLabDataset(Dataset):
+ 
+    def __init__(self, root_dir, scale_factor=1, transform=None):
+        """
+        Arguments:
+            root_dir (string): Directory with all the images.
+            transform (callable, optional): Optional transform to be applied
+                on a sample.
+        """
+        self.root_dir = root_dir
+        self.transform = transform
+
+        self.num_scenes = len(os.listdir(root_dir)) - 1
+        self.num_objects = len(os.listdir(os.path.join(root_dir, '0')))
+
+        # self.images = h5py.File(os.path.join(root_dir, "sg_data.h5"))
+        # with open(os.path.join(root_dir, "sg_data.pkl"), 'rb') as f:
+        #     self.scene_graphs = pickle.load(f)
+        # with open(os.path.join(root_dir, "sg_data.json"), 'r') as f:
+        #     self.scene_graph_metadata = json.load(f)
+
+        with open(os.path.join(root_dir, "metadata.json"), 'r') as f:
+            self.metadata = json.load(f)
+
+        self.metadata["object_id_to_name"] = {
+            v['id']:k for k,v in self.metadata["node_data"].items()
+        }
+        
+        self.no_object_label = 0
+        self.no_relationship_label = 0
+        self.num_object_labels = len(list(self.metadata["node_data"].keys()))
+        self.num_relationship_labels = 7#len(list(self.metadata["edge_data"].keys()))
+
+        self.num_graphs = self.num_scenes * self.num_objects
+        self.scale_factor = scale_factor
+
+        #calculate class weights
+        # label_counts = self.scene_graph_metadata["count"]
+        # total_num_labels_including_empty = self.num_graphs*self.num_objects
+        # label_weights = torch.zeros((self.num_object_labels))
+
+        # for i in range(self.num_object_labels-1):
+        #     label_weights[i] = label_counts[idx_to_label[str(i+1)]]
+        # total_label_count = sum(label_weights)
+        # label_weights[-1] = total_num_labels_including_empty - total_label_count
+        # self.label_weights = torch.sum(label_weights)/(self.num_object_labels*label_weights)
+        # self.label_weights = self.label_weights.cuda()
+        # import pdb; pdb.set_trace()
+        # self.scene_graph_metadata["idx_to_label"]["151"] = "None"
+
+    def __len__(self):
+        return self.num_graphs
+
+    def __getitem__(self, idx):
+
+        object_idx = idx % self.num_objects
+        scene_idx = idx // self.num_objects
+
+        item_path = os.path.join(self.root_dir, str(scene_idx), f"t_{object_idx}.pkl")
+        with open(item_path, 'rb') as f:
+            sample = pickle.load(f)
+
+
+
+        image = sample["images"]["rgb"][0].to(torch.float32)/255
+        
+        image = torch.Tensor(image)
+
+        graph = sample["graph"][0]
+
+        #channel first
+        image = image.permute((2,0,1))
+        orig_image = image.clone()
+        image = image.to(torch.float32)
+        # resize
+        if self.scale_factor != 1:
+            desired_size = (round(image.shape[-2]*self.scale_factor), round(image.shape[-1]*self.scale_factor))
+            image = torchvision.transforms.functional.resize(image, desired_size)
+        
+        #apply transformations, don't understand why [0] is required
+        image = self.transform[0](image)
+    
+        image = image.cuda()
+
+        object_to_idx = {}
+
+        object_to_training_idxs = {}
+        training_idx_counter = 0
+
+        object_data = []
+        for object in graph["nodes"].keys():
+            
+            bbox = graph["nodes"][object]["bbox"]
+            bbox = torch.tensor(bbox)
+
+            #scale according to scale factor
+            bbox = bbox*self.scale_factor
+            bbox = torch.round(bbox)
+            bbox = bbox.unsqueeze(0).cuda()
+
+            object_label = self.metadata['node_data'][graph["nodes"][object]["class_name"]]['id']     
+
+            object_data.append({
+                "bbox": bbox.to(torch.float),
+                "object_label": torch.Tensor([object_label]).to(torch.int32)
+            })      
+
+            object_to_idx[object] = len(object_data) - 1
+
+            object_to_training_idxs[object] = training_idx_counter
+            training_idx_counter += 1 
+
+        while len(object_data) < self.num_objects:
+            object_data.append({
+                "bbox": torch.zeros((1,4)).cuda().to(torch.float),
+                "object_label": torch.Tensor([self.no_object_label])
+            })      
+
+        relation_data = [None]*(self.num_objects*(self.num_objects))
+
+        for relation_tuple in graph["edges"].keys():
+            # import pdb; pdb.set_trace()
+
+            relationship_label = graph["edges"][relation_tuple]["name"]
+            relation = graph["edges"][relation_tuple]["relation_id"]
+            subject_id = relation_tuple[0]
+            object_id = relation_tuple[1]
+                
+            subject = relation_tuple[0]
+            object = relation_tuple[1]
+
+            relation_data_idx = object_to_training_idxs[subject]*self.num_objects + object_to_idx[object]
+
+            bbox = graph["edges"][relation_tuple]["bbox"]
+            bbox = torch.Tensor(bbox).unsqueeze(0).cuda()
+            bbox = bbox*self.scale_factor
+            bbox = torch.round(bbox)
+
+            dist = graph["edges"][relation_tuple]["xyz_offset"]
+            dist = torch.Tensor(dist).squeeze().unsqueeze(0).cuda()
+
+            relation_data[relation_data_idx] = {
+                "relationship_label": torch.Tensor([relation]),
+                "bbox": bbox.to(torch.float),
+                "dist": dist
+            }
+
+        for idx in range(len(relation_data)):
+            if relation_data[idx] is None:
+                relation_data[idx] = {
+                    "relationship_label": torch.Tensor([self.no_relationship_label]),
+                    "bbox": torch.zeros((1,4)).cuda().to(torch.float),
+                    "dist": torch.zeros([3]).unsqueeze(0).cuda()
+                }
+
+        relation_data = [relation_data[i] for i in range(len(relation_data)) if i%self.num_objects != 0]
+
+        object_ret_data  = {
+            "bbox": torch.concat([o["bbox"] for o in object_data]),
+            "object_label": torch.concat([o["object_label"] for o in object_data])
+        }
+
+        relation_ret_data = {
+            "relationship_label": torch.concat([e["relationship_label"] for e in relation_data]),
+            "bbox": torch.concat([e["bbox"] for e in relation_data]),
+            "dist": torch.concat([e["dist"] for e in relation_data]),
+        }
+
+        return_data = {
+            "nodes": object_ret_data,
+            "edges": relation_ret_data,
+            "image": image,
+            "orig_image": orig_image
+        }
+        return return_data
