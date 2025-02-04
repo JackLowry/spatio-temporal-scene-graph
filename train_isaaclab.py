@@ -77,26 +77,26 @@ def multi_gpu_train(rank, world_size, config):
     train(rank, config)
 
 def train(device, config):
-    wandb.init(project="scenegraphgeneration-stow", group="DDP", config=config)
+    wandb.init(project="scenegraphgeneration-isaac", group="DDP", config=config)
     generator1 = torch.Generator().manual_seed(42)
     multi_gpu = config["multi_gpu"]
 
     #process dataset
-    root_data_dir = "/home/jack/research/data/isaaclab_sg/01-31-2025:12-58-41"
-    root_dir = "/home/jack/research/scene_graph/spatio_temporal_sg"
+    root_data_dir = "/mmfs1/home/jrl712/amazon_home/data/isaaclab_sg_1000"
+    root_dir = "/mmfs1/home/jrl712/amazon_home/scene_graph/spatio-temporal-scene-graph"
     preproccess = torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    scale_factor = 0.25
+    scale_factor = 0.5
     dataset = IsaacLabDataset(root_data_dir, scale_factor=scale_factor, transform=preproccess)
     
 
     train_dataset, test_dataset = torch.utils.data.random_split(dataset, [.9, .1], generator=generator1,)
 
     if multi_gpu:
-        train_dataloader = DataLoader(train_dataset, batch_size=8, shuffle=False, sampler=DistributedSampler(train_dataset))
-        test_dataloader = DataLoader(test_dataset, batch_size=8, shuffle=False, sampler=DistributedSampler(test_dataset))
+        train_dataloader = DataLoader(train_dataset, batch_size=64, shuffle=False, sampler=DistributedSampler(train_dataset))
+        test_dataloader = DataLoader(test_dataset, batch_size=64, shuffle=False, sampler=DistributedSampler(test_dataset))
     else:
-        train_dataloader = DataLoader(train_dataset, batch_size=8, shuffle=True)
-        test_dataloader = DataLoader(test_dataset, batch_size=8, shuffle=True)
+        train_dataloader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+        test_dataloader = DataLoader(test_dataset, batch_size=64, shuffle=True)
 
 
     training_iterations = 1000
@@ -278,7 +278,6 @@ def main(config: DictConfig) -> None:
 
     else:
         device = torch.device("cuda:0")
-        device = torch.device("cpu")
         train(device, config)
         
 

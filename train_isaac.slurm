@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=train_stow_sggen
+#SBATCH --job-name=train_isaac_sggen
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=jrl712@uw.edu
 
@@ -20,4 +20,4 @@
 # Modules to use (optional).
 
 # Your programs to run.
-apptainer exec --nv --overlay /gscratch/sciencehub/jrl712/conda_overlay3.img:ro /gscratch/sciencehub/jrl712/hyak-container.sif /mmfs1/home/jrl712/amazon_home/scene_graph/spatio-temporal-scene-graph/train_stow.sh $1
+apptainer exec --nv --overlay /gscratch/sciencehub/jrl712/conda_overlay3.img:ro /gscratch/sciencehub/jrl712/hyak-container.sif /mmfs1/home/jrl712/amazon_home/scene_graph/spatio-temporal-scene-graph/train_isaac.sh $1

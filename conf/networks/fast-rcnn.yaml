@@ -4,5 +4,5 @@ defaults:
   - _self_
 
 network_config: 
-  encoder_model: "lstm"
+  encoder_model: "cnn"
   feature_extractor: "resnet_fpn"

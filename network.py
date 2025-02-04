@@ -4,6 +4,10 @@ from torch.autograd import Variable
 import torch.nn.functional as F
 import torchvision.ops as ops
 import torchvision
+from torch.nn import Linear, Parameter
+from torch_geometric.nn import MessagePassing
+from torch_geometric.utils import add_self_loops, degree
+
 class BiLSTM_Encoder(nn.Module):
     
     def __init__(self, input_dim, hidden_dim, use_gpu, batch_size, num_lstm_layers, dropout):
@@ -94,14 +98,13 @@ class RGBFeatureExtractor(nn.Module):
         self.extractor(x)
         return self.outputs
 
-    
-class LatentDecoderHead(nn.Module):
+class MLP(nn.Module):
 
-    def __init__(self, latent_size, layer_dimensions, dropout, activation_fn=nn.ReLU, normalization_layer=nn.BatchNorm1d):
-        super(LatentDecoderHead, self).__init__()
+    def __init__(self, out_size, layer_dimensions, dropout, activation_fn=nn.ReLU, normalization_layer=nn.BatchNorm1d):
+        super(MLP, self).__init__()
 
         layers = []
-        last_layer_dim = latent_size
+        last_layer_dim = out_size
 
         #create MLP
         for layer_dim in layer_dimensions[:-1]:
@@ -213,15 +216,58 @@ class SceneGraphGenerator(nn.Module):
             edge_latents = edge_latents.reshape(batch_size, num_edges, -1)
 
         return node_latents, edge_latents
-    
+
+class GCNConv(MessagePassing):
+    def __init__(self, in_channels, out_channels):
+        super().__init__(aggr='add')  # "Add" aggregation (Step 5).
+        self.lin = Linear(in_channels, out_channels, bias=False)
+        self.bias = Parameter(torch.empty(out_channels))
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        self.lin.reset_parameters()
+        self.bias.data.zero_()
+
+    def forward(self, x, edge_index):
+        # x has shape [N, in_channels]
+        # edge_index has shape [2, E]
+
+        # Step 1: Add self-loops to the adjacency matrix.
+        edge_index, _ = add_self_loops(edge_index, num_nodes=x.size(0))
+
+        # Step 2: Linearly transform node feature matrix.
+        x = self.lin(x)
+
+        # Step 3: Compute normalization.
+        row, col = edge_index
+        deg = degree(col, x.size(0), dtype=x.dtype)
+        deg_inv_sqrt = deg.pow(-0.5)
+        deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
+        norm = deg_inv_sqrt[row] * deg_inv_sqrt[col]
+
+        # Step 4-5: Start propagating messages.
+        out = self.propagate(edge_index, x=x, norm=norm)
+
+        # Step 6: Apply a final bias vector.
+        out = out + self.bias
+
+        return out
+
+    def message(self, x_j, norm):
+        # x_j has shape [E, out_channels]
+
+        # Step 4: Normalize node features.
+        return norm.view(-1, 1) * x_j
+
 class SceneGraphExtractor(nn.Module):
 
         def __init__(self):
             super(SceneGraphExtractor, self).__init__()
 
-            self.visible_extractor = LatentDecoderHead(512, [256, 64, 2])
+            self.visible_extractor = MLP(512, [256, 64, 2])
 
-            self.relative_position_extractor = LatentDecoderHead(512, [256, 64, 3])
+            self.relative_position_extractor = MLP(512, [256, 64, 3])
 
         def forward(self, node_latents, edge_latents):
             
@@ -256,10 +302,10 @@ class PretrainSceneGraphModel(nn.Module):
 
             self.generator = SceneGraphGenerator(num_nodes, num_lstm_layers, latent_size, dropout, encoder_model, feature_extractor)
             
-            self.node_label_extractor = LatentDecoderHead(latent_size, [latent_size//2, latent_size//4, num_node_labels], dropout)
-            self.edge_label_extractor = LatentDecoderHead(latent_size, [latent_size//2, latent_size//4, num_edge_labels], dropout)
+            self.node_label_extractor = MLP(latent_size, [latent_size//2, latent_size//4, num_node_labels], dropout)
+            self.edge_label_extractor = MLP(latent_size, [latent_size//2, latent_size//4, num_edge_labels], dropout)
 
-            self.relative_position_extractor = LatentDecoderHead(latent_size, [latent_size//2, latent_size//4, 2], dropout)
+            self.relative_position_extractor = MLP(latent_size, [latent_size//2, latent_size//4, 2], dropout)
 
 
         # def reset_model(self):
@@ -283,16 +329,51 @@ class StowTrainSceneGraphModel(nn.Module):
 
             self.generator = SceneGraphGenerator(num_nodes, num_lstm_layers, latent_size, dropout, encoder_model, feature_extractor)
             
-            self.node_label_extractor = LatentDecoderHead(latent_size, [latent_size//2, latent_size//4, num_node_labels], dropout)
-            self.edge_label_extractor = LatentDecoderHead(latent_size, [latent_size//2, latent_size//4, num_edge_labels], dropout)
+            self.node_label_extractor = MLP(latent_size, [latent_size//2, latent_size//4, num_node_labels], dropout)
+            self.edge_label_extractor = MLP(latent_size, [latent_size//2, latent_size//4, num_edge_labels], dropout)
 
-            self.relative_position_extractor = LatentDecoderHead(latent_size, [latent_size//2, latent_size//4, 3], dropout)
+            self.relative_position_extractor = MLP(latent_size, [latent_size//2, latent_size//4, 3], dropout)
 
 
         # def reset_model(self):
 
 
         def forward(self, image, object_bounding_boxes, union_bounding_boxes):
+
+            node_latents, edge_latents = self.generator(image, object_bounding_boxes, union_bounding_boxes)
+
+            node_labels = self.node_label_extractor(node_latents)
+            edge_labels = self.edge_label_extractor(edge_latents)
+
+            relative_position = self.relative_position_extractor(edge_latents)
+
+            return (node_labels, edge_labels, relative_position)
+
+class UpdateSceneGraphModel(nn.Module):
+        def __init__(self, num_nodes, num_node_labels, num_edge_labels, num_lstm_layers=1, latent_size=512, dropout=0.5, encoder_model="lstm", feature_extractor="dino"):
+            super(StowTrainSceneGraphModel, self).__init__()
+
+            self.latent_encoder = SceneGraphGenerator(num_nodes, num_lstm_layers, latent_size, dropout, encoder_model, feature_extractor)
+            
+            self.graph_
+
+
+            self.node_label_extractor = MLP(latent_size, [latent_size//2, latent_size//4, num_node_labels], dropout)
+            self.edge_label_extractor = MLP(latent_size, [latent_size//2, latent_size//4, num_edge_labels], dropout)
+
+            self.relative_position_extractor = MLP(latent_size, [latent_size//2, latent_size//4, 3], dropout)
+
+
+        # def reset_model(self):
+
+
+        def forward(self, observations):
+
+            latents = []
+
+            for o in observations:
+                (image, object_bounding_boxes, union_bounding_boxes, node_latents, edge_latents) = o
+                latents.append(self.generator(image, object_bounding_boxes, union_bounding_boxes))
 
             node_latents, edge_latents = self.generator(image, object_bounding_boxes, union_bounding_boxes)
 

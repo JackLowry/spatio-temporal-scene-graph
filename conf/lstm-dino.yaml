@@ -5,4 +5,4 @@ defaults:
 
 network_config: 
   encoder_model: "lstm"
-  feature_extractor: "resnet_fpn"
+  feature_extractor: "dino"

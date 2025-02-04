@@ -311,6 +311,10 @@ class StowDataset(Dataset):
         #apply transformations, don't understand why [0] is required
         image = self.transform[0](image)
     
+        required_padding = [0,0,14-image.shape[-2]%14,14-image.shape[-1]%14]
+        if required_padding[-1] != 14:
+            image = torchvision.transforms.functional.pad(image, required_padding, 0)
+
         image = image.cuda()
 
         object_to_idx = {}
