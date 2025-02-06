@@ -70,7 +70,7 @@ def ddp_setup(rank: int, world_size: int):
   torch.cuda.set_device(rank)
   init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
-config_name = "fast-rcnn.yaml"
+config_name = "networks/resnet-imp.yaml"
 
 def multi_gpu_train(rank, world_size, config):
     ddp_setup(rank, world_size)
@@ -82,27 +82,30 @@ def train(device, config):
     multi_gpu = config["multi_gpu"]
 
     #process dataset
-    root_data_dir = "/mmfs1/home/jrl712/amazon_home/data/isaaclab_sg_1000"
-    root_dir = "/mmfs1/home/jrl712/amazon_home/scene_graph/spatio-temporal-scene-graph"
+    # root_data_dir = "/mmfs1/home/jrl712/amazon_home/data/isaaclab_sg_1000"
+    # root_dir = "/mmfs1/home/jrl712/amazon_home/scene_graph/spatio-temporal-scene-graph"
+    root_data_dir = "/home/jack/research/data/isaaclab_sg/01-31-2025:14-46-04"
+    root_dir = "/home/jack/research/scene_graph/spatio_temporal_sg"
     preproccess = torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    scale_factor = 0.5
+    scale_factor = config['scale_factor']
+    batch_size = config['batch_size']
     dataset = IsaacLabDataset(root_data_dir, scale_factor=scale_factor, transform=preproccess)
     
 
     train_dataset, test_dataset = torch.utils.data.random_split(dataset, [.9, .1], generator=generator1,)
 
     if multi_gpu:
-        train_dataloader = DataLoader(train_dataset, batch_size=64, shuffle=False, sampler=DistributedSampler(train_dataset))
-        test_dataloader = DataLoader(test_dataset, batch_size=64, shuffle=False, sampler=DistributedSampler(test_dataset))
+        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, sampler=DistributedSampler(train_dataset))
+        test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, sampler=DistributedSampler(test_dataset))
     else:
-        train_dataloader = DataLoader(train_dataset, batch_size=64, shuffle=True)
-        test_dataloader = DataLoader(test_dataset, batch_size=64, shuffle=True)
+        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
 
 
     training_iterations = 1000
 
     network_config = config["network_config"]
-    model = StowTrainSceneGraphModel(4, dataset.num_object_labels, dataset.num_relationship_labels, **network_config)
+    model = StowTrainSceneGraphModel(batch_size, dataset.num_objects, dataset.num_object_labels, dataset.num_relationship_labels, network_config)
     model = model.to(device)
 
     if multi_gpu:
@@ -126,6 +129,15 @@ def train(device, config):
 
     step = 0
 
+    # edge_idx_to_node_idxs = []
+    # for i in range(dataset.num_objects):
+    #     for j in range(dataset.num_objects):
+    #         if i == j:
+    #             continue
+    #         edge_idx_to_node_idxs.append(
+    #             [i*dataset.num_objects + j, i, j]
+    #         )
+
     for epoch in tqdm(range(2, training_iterations)):
         losses = []
         node_losses = []
@@ -143,6 +155,7 @@ def train(device, config):
             batch_images = batch_rgb
             batch_object_bbox = batch["nodes"]["bbox"].to(device)
             batch_union_bbox = batch["edges"]["bbox"].to(device)
+            batch_edge_idx_to_node_idxs = batch["edge_idx_to_node_idxs"].to(device)
             gt_node_label = batch["nodes"]["object_label"].to(device)
             gt_edge_label = batch["edges"]["relationship_label"].to(device)
             gt_pos = batch["edges"]["dist"].to(device)
@@ -155,7 +168,7 @@ def train(device, config):
             # not_visible = gt_visible == 0
             # gt_pos[not_visible] = torch.zeros((3)).to(device)
 
-            node_labels, edge_labels, relative_position = model(batch_images, batch_object_bbox, batch_union_bbox)
+            node_labels, edge_labels, relative_position = model(batch_images, batch_object_bbox, batch_union_bbox, batch_edge_idx_to_node_idxs)
 
             node_loss = node_label_loss_metric(node_labels.permute(0, 2, 1), gt_node_label.long())
             edge_loss = edge_label_loss_metric(edge_labels.permute(0, 2, 1), gt_edge_label.long())
@@ -194,11 +207,12 @@ def train(device, config):
                             batch_images = batch_rgb
                             batch_object_bbox = batch["nodes"]["bbox"].to(device)
                             batch_union_bbox = batch["edges"]["bbox"].to(device)
+                            batch_edge_idx_to_node_idxs = batch["edge_idx_to_node_idxs"].to(device)
                             gt_node_label = batch["nodes"]["object_label"].to(device)
                             gt_edge_label = batch["edges"]["relationship_label"].to(device)
                             gt_pos = batch["edges"]["dist"].to(device)
 
-                            node_labels, edge_labels, relative_position = model(batch_images, batch_object_bbox, batch_union_bbox)
+                            node_labels, edge_labels, relative_position = model(batch_images, batch_object_bbox, batch_union_bbox, batch_edge_idx_to_node_idxs)
                             node_loss = node_label_loss_metric(node_labels.permute(0, 2, 1), gt_node_label.long())
                             edge_loss = edge_label_loss_metric(edge_labels.permute(0, 2, 1), gt_edge_label.long())
                             pos_loss = pos_loss_metric(relative_position, gt_pos)

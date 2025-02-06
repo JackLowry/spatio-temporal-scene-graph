@@ -5,7 +5,7 @@ from torch.optim import Adam
 import torch.nn as nn
 import PIL
 from network import StowTrainSceneGraphModel
-from data_loader import StowDataset
+from data_loader import IsaacLabDataset, StowDataset
 from visualization import visualize_boxes, draw_image
 import sys
 
@@ -70,7 +70,7 @@ def ddp_setup(rank: int, world_size: int):
   torch.cuda.set_device(rank)
   init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
-config_name = "fast-rcnn.yaml"
+config_name = "networks/resnet-imp.yaml"
 
 def multi_gpu_train(rank, world_size, config):
     ddp_setup(rank, world_size)
@@ -82,25 +82,25 @@ def train(device, config):
     multi_gpu = config["multi_gpu"]
 
     #process dataset
-    root_data_dir = "/mmfs1/home/jrl712/amazon_home/data/bin_syn"
+    root_data_dir = "/home/jack/research/data/isaaclab_sg/01-30-2025:13-23-03"
     preproccess = torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    dataset = StowDataset(root_data_dir, 5, scale_factor=1, transform=preproccess)
+    dataset = IsaacLabDataset(root_data_dir, scale_factor=0.5, transform=preproccess)
     
 
     train_dataset, test_dataset = torch.utils.data.random_split(dataset, [.9, .1], generator=generator1,)
 
     if multi_gpu:
-        train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=False, sampler=DistributedSampler(train_dataset))
-        test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle=False, sampler=DistributedSampler(test_dataset))
+        train_dataloader = DataLoader(train_dataset, batch_size=2, shuffle=False, sampler=DistributedSampler(train_dataset))
+        test_dataloader = DataLoader(test_dataset, batch_size=2, shuffle=False, sampler=DistributedSampler(test_dataset))
     else:
-        train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-        test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle=True)
+        train_dataloader = DataLoader(train_dataset, batch_size=2, shuffle=True)
+        test_dataloader = DataLoader(test_dataset, batch_size=2, shuffle=True)
 
 
     training_iterations = 1000
 
     network_config = config["network_config"]
-    model = StowTrainSceneGraphModel(10, dataset.num_object_labels, dataset.num_relationship_labels, **network_config)
+    model = StowTrainSceneGraphModel(4, dataset.num_object_labels, dataset.num_relationship_labels, network_config)
     model = model.to(device)
 
     if multi_gpu:
@@ -152,8 +152,8 @@ def train(device, config):
             # (gt_edge_label, gt_pos) = edge_parameters
             # not_visible = gt_visible == 0
             # gt_pos[not_visible] = torch.zeros((3)).to(device)
-
-            node_labels, edge_labels, relative_position = model(batch_images, batch_object_bbox, batch_union_bbox)
+            
+            node_labels, edge_labels, relative_position = model(batch_images, batch_object_bbox, batch_union_bbox, batch_edge)
 
             node_loss = node_label_loss_metric(node_labels.permute(0, 2, 1), gt_node_label.long())
             edge_loss = edge_label_loss_metric(edge_labels.permute(0, 2, 1), gt_edge_label.long())

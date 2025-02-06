@@ -530,6 +530,8 @@ class IsaacLabDataset(Dataset):
 
         relation_data = [None]*(self.num_objects*(self.num_objects))
 
+        edge_idx_to_node_idxs = [None]*(self.num_objects*(self.num_objects))
+
         for relation_tuple in graph["edges"].keys():
             # import pdb; pdb.set_trace()
 
@@ -542,6 +544,7 @@ class IsaacLabDataset(Dataset):
             object = relation_tuple[1]
 
             relation_data_idx = object_to_training_idxs[subject]*self.num_objects + object_to_idx[object]
+            edge_idx_to_node_idxs[relation_data_idx] = [relation_data_idx, object_to_idx[subject_id], object_to_idx[object_id]]
 
             bbox = graph["edges"][relation_tuple]["bbox"]
             bbox = torch.Tensor(bbox).unsqueeze(0).cuda()
@@ -557,15 +560,9 @@ class IsaacLabDataset(Dataset):
                 "dist": dist
             }
 
-        for idx in range(len(relation_data)):
-            if relation_data[idx] is None:
-                relation_data[idx] = {
-                    "relationship_label": torch.Tensor([self.no_relationship_label]),
-                    "bbox": torch.zeros((1,4)).cuda().to(torch.float),
-                    "dist": torch.zeros([3]).unsqueeze(0).cuda()
-                }
-
-        relation_data = [relation_data[i] for i in range(len(relation_data)) if i%self.num_objects != 0]
+        relation_data = [relation_data[i] for i in range(len(relation_data)) if relation_data[i] is not None]
+        edge_idx_to_node_idxs = [edge_idx_to_node_idxs[i] for i in range(len(edge_idx_to_node_idxs)) if edge_idx_to_node_idxs[i] is not None]
+        edge_idx_to_node_idxs = torch.Tensor(edge_idx_to_node_idxs)
 
         object_ret_data  = {
             "bbox": torch.concat([o["bbox"] for o in object_data]),
@@ -582,6 +579,7 @@ class IsaacLabDataset(Dataset):
             "nodes": object_ret_data,
             "edges": relation_ret_data,
             "image": image,
-            "orig_image": orig_image
+            "orig_image": orig_image,
+            "edge_idx_to_node_idxs": edge_idx_to_node_idxs
         }
         return return_data

@@ -4,9 +4,6 @@ from torch.autograd import Variable
 import torch.nn.functional as F
 import torchvision.ops as ops
 import torchvision
-from torch.nn import Linear, Parameter
-from torch_geometric.nn import MessagePassing
-from torch_geometric.utils import add_self_loops, degree
 
 class BiLSTM_Encoder(nn.Module):
     
@@ -36,7 +33,7 @@ class BiLSTM_Encoder(nn.Module):
 
         return y
     
-class CNN_Encoder(nn.Module):
+class  CNN_Encoder(nn.Module):
 
     def __init__(self, input_channels, channels, kernel_sizes, dropout=0, activation_fn=nn.ReLU):
         super(CNN_Encoder, self).__init__()
@@ -128,13 +125,13 @@ class MLP(nn.Module):
 
 class SceneGraphGenerator(nn.Module):
 
-    def __init__(self, num_nodes, num_lstm_layers, latent_size, dropout, encoder_model, feature_extractor):
+    def __init__(self, batch_size, num_nodes, network_args):
         super(SceneGraphGenerator, self).__init__()
 
-        self.feature_extractor = feature_extractor
+        self.feature_extractor_type = network_args['feature_extractor']
 
         # if feature_extractor == "dino":
-        self.extractor = RGBFeatureExtractor(feature_extractor)
+        self.extractor = RGBFeatureExtractor(self.feature_extractor_type)
         self.embedding_dim = self.extractor.embedding_dim
         # else:
 
@@ -143,20 +140,31 @@ class SceneGraphGenerator(nn.Module):
         self.num_edges = num_nodes*(num_nodes-1)
 
         self.use_gpu = True
-        self.batch_size = 16
-        self.encoder_model = encoder_model
+        self.batch_size = batch_size
+        self.encoder_model = network_args['encoder_model']
+        self.latent_size = network_args['latent_size']
 
         if self.encoder_model == 'lstm':
-            self.node_encoder = BiLSTM_Encoder(49*self.embedding_dim, latent_size//2, self.use_gpu, self.batch_size, num_lstm_layers, dropout)
-            self.edge_encoder = BiLSTM_Encoder(49*self.embedding_dim, latent_size//2, self.use_gpu, self.batch_size, num_lstm_layers, dropout)
+            #kwargs:
+            # num_lstm_layers: number of lstm layers in the encoder
+            # dropout: amount of dropout to use in the intermediate layersz
+            self.node_encoder = BiLSTM_Encoder(49*self.embedding_dim, self.latent_size//2, self.use_gpu, self.batch_size, 
+                                               network_args['num_lstm_layers'], network_args['dropout'])
+            self.edge_encoder = BiLSTM_Encoder(49*self.embedding_dim, self.latent_size//2, self.use_gpu, self.batch_size, 
+                                               network_args['num_lstm_layers'], network_args['dropout'])
         elif self.encoder_model == "cnn":
-            self.node_encoder = CNN_Encoder(self.embedding_dim, [1024,latent_size], [2,2])
-            self.edge_encoder = CNN_Encoder(self.embedding_dim, [1024,latent_size], [2,2])
+            self.node_encoder = CNN_Encoder(self.embedding_dim, [1024,self.latent_size], [2,2])
+            self.edge_encoder = CNN_Encoder(self.embedding_dim, [1024,self.latent_size], [2,2])
+        elif self.encoder_model == 'iterative-message-passing':
+            #kwargs:
+            # iterations: number of message passing iterations
+            self.encoder = IterativeMessagePoolingPassingLayer(self.batch_size, self.embedding_dim, self.latent_size, self.latent_size, network_args['iterations'])
+        
         # self.node_latent_downscaler = ops.MLP(128, [256, 64], dropout=0.2)
 
 
 
-    def forward(self, image, object_bounding_boxes, union_bounding_boxes):
+    def forward(self, image, object_bounding_boxes, union_bounding_boxes, edge_idx_to_node_idxs):
 
         image_features = self.extractor(image)
 
@@ -164,9 +172,7 @@ class SceneGraphGenerator(nn.Module):
         num_objects = object_bounding_boxes[0].shape[0]
         num_edges = union_bounding_boxes[0].shape[0]
 
-
-
-        is_all_zeros = torch.all(object_bounding_boxes.flatten(0, 1) == 0, dim=1)
+        # is_all_zeros = torch.all(object_bounding_boxes.flatten(0, 1) == 0, dim=1)
 
         object_bounding_boxes = torch.split(object_bounding_boxes, 1)
 
@@ -179,11 +185,11 @@ class SceneGraphGenerator(nn.Module):
         union_bounding_boxes = torch.split(union_bounding_boxes, 1)
         union_bounding_boxes = [o.squeeze() for o in union_bounding_boxes]
 
-        if self.feature_extractor=="dino":
+        if self.feature_extractor_type=="dino":
             scale_factor = image_features.shape[-1] / float(image.shape[-1])
             object_features = ops.roi_align(image_features, object_bounding_boxes, output_size=(7,7), spatial_scale=scale_factor)
             edge_features = ops.roi_align(image_features, union_bounding_boxes, output_size=(7,7), spatial_scale=scale_factor)
-        if self.feature_extractor=="resnet_fpn":
+        if self.feature_extractor_type=="resnet_fpn":
 
             object_features = []
             edge_features = []
@@ -199,66 +205,119 @@ class SceneGraphGenerator(nn.Module):
             edge_features = torch.concat(edge_features,dim=1)
             # edge_features = edge_features.reshape(edge_features.shape[0], edge_features.shape[1], -1, )
             
+        if self.encoder_model == 'iterative-message-passing':
+            node_latents, edge_latents = self.encoder(object_features, edge_features, edge_idx_to_node_idxs)
+        else:
+            if self.encoder_model == 'lstm':
+                object_features = object_features.reshape((batch_size, num_objects, -1))
+                edge_features = edge_features.reshape(batch_size, num_edges, -1)
 
+            node_latents = self.node_encoder(object_features)
+            
+            # node_latents_downscaled = self.node_latent_downscaler(node_latents)
 
-        if self.encoder_model == 'lstm':
-            object_features = object_features.reshape((batch_size, num_objects, -1))
-            edge_features = edge_features.reshape(batch_size, num_edges, -1)
+            edge_latents = self.edge_encoder(edge_features)
 
-        node_latents = self.node_encoder(object_features)
-        
-        # node_latents_downscaled = self.node_latent_downscaler(node_latents)
-
-        edge_latents = self.edge_encoder(edge_features)
-
-        if self.encoder_model == "cnn":
-            node_latents = node_latents.reshape((batch_size, num_objects, -1))
-            edge_latents = edge_latents.reshape(batch_size, num_edges, -1)
+            if self.encoder_model == "cnn":
+                node_latents = node_latents.reshape((batch_size, num_objects, -1))
+                edge_latents = edge_latents.reshape(batch_size, num_edges, -1)
 
         return node_latents, edge_latents
 
-class GCNConv(MessagePassing):
-    def __init__(self, in_channels, out_channels):
-        super().__init__(aggr='add')  # "Add" aggregation (Step 5).
-        self.lin = Linear(in_channels, out_channels, bias=False)
-        self.bias = Parameter(torch.empty(out_channels))
+#implement message pooling & passing from Scene Graph Generation by Iterative Message Passing (Xu et al)
+class IterativeMessagePoolingPassingLayer(nn.Module):
+    def __init__(self, batch_size, embedding_dim, node_latent_dim, edge_latent_dim, iterations):
+        super(IterativeMessagePoolingPassingLayer, self).__init__()
 
-        self.reset_parameters()
+        self.node_gru = nn.GRUCell(node_latent_dim, node_latent_dim)
+        self.edge_gru = nn.GRUCell(edge_latent_dim, edge_latent_dim)
 
-    def reset_parameters(self):
-        self.lin.reset_parameters()
-        self.bias.data.zero_()
+        # each pooling layer takes in all node/edge features, computes an adaptive pooling factor based on all adjacent edges/nodes
+        self.node_pool_factor = nn.Sequential(nn.Linear(node_latent_dim + edge_latent_dim, 1, bias=False), nn.Sigmoid())
+        self.edge_pool_factor_subject = nn.Sequential(nn.Linear(node_latent_dim + edge_latent_dim, 1, bias=False), nn.Sigmoid())
+        self.edge_pool_factor_object = nn.Sequential(nn.Linear(node_latent_dim + edge_latent_dim, 1, bias=False), nn.Sigmoid())
 
-    def forward(self, x, edge_index):
-        # x has shape [N, in_channels]
-        # edge_index has shape [2, E]
+        self.node_latent_dim = node_latent_dim
+        self.edge_latent_dim = edge_latent_dim
+        self.embedding_dim = embedding_dim
+        self.batch_size = batch_size
+        self.iterations=iterations
 
-        # Step 1: Add self-loops to the adjacency matrix.
-        edge_index, _ = add_self_loops(edge_index, num_nodes=x.size(0))
+        self.node_cnn= CNN_Encoder(embedding_dim, [1024,self.node_latent_dim], [2,2])
+        self.edge_cnn = CNN_Encoder(embedding_dim, [1024,self.edge_latent_dim], [2,2])
 
-        # Step 2: Linearly transform node feature matrix.
-        x = self.lin(x)
 
-        # Step 3: Compute normalization.
-        row, col = edge_index
-        deg = degree(col, x.size(0), dtype=x.dtype)
-        deg_inv_sqrt = deg.pow(-0.5)
-        deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
-        norm = deg_inv_sqrt[row] * deg_inv_sqrt[col]
+    def forward(self, node_latents, edge_latents, edge_idx_to_node_idxs):
 
-        # Step 4-5: Start propagating messages.
-        out = self.propagate(edge_index, x=x, norm=norm)
+        node_latents = self.node_cnn(node_latents)
+        edge_latents = self.edge_cnn(edge_latents)
 
-        # Step 6: Apply a final bias vector.
-        out = out + self.bias
+        node_hidden = self.node_gru(node_latents)
+        edge_hidden = self.edge_gru(edge_latents)
 
-        return out
+        edge_subject_idxs = edge_idx_to_node_idxs[:, :, 1].to(torch.long)
+        edge_object_idxs = edge_idx_to_node_idxs[:, :, 2].to(torch.long)
 
-    def message(self, x_j, norm):
-        # x_j has shape [E, out_channels]
+        node_hiddens = [node_hidden.clone()]
+        edge_hiddens = [edge_hidden.clone()]
 
-        # Step 4: Normalize node features.
-        return norm.view(-1, 1) * x_j
+        num_nodes = node_latents.shape[0]//self.batch_size
+        num_edges = edge_latents.shape[0]//self.batch_size
+
+
+        #mapping of which nodes are connected to which edges
+        node_edge_mat = torch.zeros(self.batch_size, num_nodes, num_edges).to(node_latents.device)
+        batch_idxs = torch.arange(self.batch_size).repeat_interleave(2*num_edges).to(torch.long).to(node_latents.device)
+        node_idxs = edge_idx_to_node_idxs[:, :, 1:].reshape(-1).to(torch.long).to(node_latents.device)
+        edge_idxs = torch.arange(num_edges).repeat_interleave(2).tile((self.batch_size)).to(node_latents.device)
+        
+        node_edge_mat[batch_idxs, node_idxs, edge_idxs] = 1.0
+
+        for i in range(self.iterations):
+            node_hidden = node_hiddens[-1].clone()
+            edge_hidden = edge_hiddens[-1].clone()
+            node_hidden = node_hidden.reshape(self.batch_size, -1, self.node_latent_dim)
+            edge_hidden = edge_hidden.reshape(self.batch_size, -1, self.edge_latent_dim)
+
+            nodes_repeated_subject = torch.gather(
+                node_hidden,
+                index=edge_subject_idxs.unsqueeze(-1).tile((1,1,self.node_latent_dim)),
+                dim=1
+            )
+
+            nodes_repeated_object = torch.gather(
+                node_hidden,
+                index=edge_object_idxs.unsqueeze(-1).tile((1,1,self.node_latent_dim)),
+                dim=1
+            )
+            #Each row in this tensor is [the subject node latent, edge latent] for all edges
+            node_message = self.node_pool_factor(torch.cat((
+                nodes_repeated_subject, #we need to repeat these nodes to match the number of edges. 
+                edge_hidden,
+            ), dim=-1)) * edge_hidden
+            node_message = node_edge_mat @ node_message
+
+            edge_message_subject = self.edge_pool_factor_subject(torch.cat((
+                nodes_repeated_subject, #we need to repeat these nodes to match the number of edges. 
+                edge_hidden
+            ), dim=-1)) * nodes_repeated_subject
+
+            edge_message_object = self.edge_pool_factor_object(torch.cat((
+                nodes_repeated_object, #we need to repeat these nodes to match the number of edges. 
+                edge_hidden
+            ), dim=-1)) * nodes_repeated_object
+
+            edge_message = edge_message_subject + edge_message_object
+
+            node_message = node_message.reshape(-1, self.node_latent_dim)
+            edge_message = edge_message.reshape(-1, self.edge_latent_dim)
+
+            node_hiddens.append(self.node_gru(node_message, node_hiddens[i]))
+            edge_hiddens.append(self.edge_gru(edge_message, edge_hiddens[i]))
+
+        
+        
+        return (node_hidden, edge_hidden)
 
 class SceneGraphExtractor(nn.Module):
 
@@ -324,10 +383,14 @@ class PretrainSceneGraphModel(nn.Module):
 
 class StowTrainSceneGraphModel(nn.Module):
 
-        def __init__(self, num_nodes, num_node_labels, num_edge_labels, num_lstm_layers=1, latent_size=512, dropout=0.5, encoder_model="lstm", feature_extractor="dino"):
+        #num_lstm_layers=1, latent_size=512, dropout=0.5, encoder_model="lstm", feature_extractor="dino"
+        def __init__(self, batch_size, num_nodes, num_node_labels, num_edge_labels, network_args):
             super(StowTrainSceneGraphModel, self).__init__()
 
-            self.generator = SceneGraphGenerator(num_nodes, num_lstm_layers, latent_size, dropout, encoder_model, feature_extractor)
+            dropout = network_args['dropout']
+            latent_size = network_args['latent_size']
+
+            self.generator = SceneGraphGenerator(batch_size, num_nodes, network_args)
             
             self.node_label_extractor = MLP(latent_size, [latent_size//2, latent_size//4, num_node_labels], dropout)
             self.edge_label_extractor = MLP(latent_size, [latent_size//2, latent_size//4, num_edge_labels], dropout)
@@ -338,9 +401,9 @@ class StowTrainSceneGraphModel(nn.Module):
         # def reset_model(self):
 
 
-        def forward(self, image, object_bounding_boxes, union_bounding_boxes):
+        def forward(self, image, object_bounding_boxes, union_bounding_boxes, edge_idx_to_node_idxs):
 
-            node_latents, edge_latents = self.generator(image, object_bounding_boxes, union_bounding_boxes)
+            node_latents, edge_latents = self.generator(image, object_bounding_boxes, union_bounding_boxes, edge_idx_to_node_idxs)
 
             node_labels = self.node_label_extractor(node_latents)
             edge_labels = self.edge_label_extractor(edge_latents)

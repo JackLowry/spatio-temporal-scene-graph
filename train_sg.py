@@ -3,8 +3,8 @@ from torch.utils.data import DataLoader
 from torch.optim import Adam
 import torch.nn as nn
 import PIL
-from network import FullSceneGraphModel
-from data_loader import SceneGraphDataset
+from network import FullSceneGraphModel, PretrainSceneGraphModel
+from data_loader import IsaacLabDataset, SceneGraphDataset
 from visualization import visualize_boxes
 
 import numpy as np
@@ -49,15 +49,15 @@ def randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, 
 
 wandb.init(project="scenegraphgeneration")
 
-root_data_dir = "/mmfs1/home/jrl712/amazon_home/data/sg_data_gt"
-dataset = SceneGraphDataset(root_data_dir)
-train_dataloader = DataLoader(dataset, batch_size=64a, shuffle=True)
+root_data_dir = "/home/jack/research/data/isaaclab_sg/01-30-2025:13-23-03"
+dataset = IsaacLabDataset(root_data_dir)
+train_dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
 
 device = torch.device("cuda:0")
 
 training_iterations = 1000
 
-model = FullSceneGraphModel(10, dataset.).to(device)
+model = PretrainSceneGraphModel(dataset.num_object_labels, dataset.num_relationship_labels).to(device)
 
 visible_loss_metric = nn.CrossEntropyLoss()
 pos_loss_metric= nn.MSELoss()
