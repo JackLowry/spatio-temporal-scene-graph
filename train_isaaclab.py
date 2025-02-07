@@ -226,12 +226,12 @@ def train(device, config):
                             pos_loss = pos_loss_metric(relative_position, gt_pos)
 
                             pred_node_logits = nn.functional.softmax(node_labels, dim=-1)
-                            node_logits_total.append(pred_edge_logits.cpu())
+                            node_logits_total.append(pred_node_logits.cpu())
                             pred_edge_logits = nn.functional.softmax(edge_labels, dim=-1)
                             edge_logits_total.append(pred_edge_logits.cpu())
 
-                            node_gt_total.append(gt_node_label.cpu())
-                            edge_gt_total.append(gt_edge_label.cpu())
+                            node_gt_total.append(gt_node_label.cpu().to(torch.long))
+                            edge_gt_total.append(gt_edge_label.cpu().to(torch.long))
 
                             test_node_loss.append(node_loss)
                             test_edge_loss.append(edge_loss)
@@ -247,12 +247,12 @@ def train(device, config):
                         node_gt_total = torch.concat(node_gt_total)
                         edge_gt_total = torch.concat(edge_gt_total)
 
-                        node_f1 = metrics.f1_score(node_logits_total, node_gt_total)
-                        edge_f1 = metrics.f1_score(edge_logits_total, edge_gt_total)
-                        node_recall_at_5 = metrics.recall_at_k(node_logits_total, node_gt_total, 5)
-                        node_language_labels = [dataset.metadata["object_id_to_name"][idx] for idx in range(dataset.num_object_labels)]
-                        node_confusion_matrix = metrics.confusion_matrix(node_logits_total, node_gt_total, labels=node_language_labels)
-                        edge_confusion_matrix = metrics.confusion_matrix(edge_logits_total, edge_gt_total, labels=edge_language_labels)
+                        node_f1 = metrics.graph_f1_score(node_logits_total, node_gt_total)
+                        edge_f1 = metrics.graph_f1_score(edge_logits_total, edge_gt_total)
+                        node_recall_at_5 = metrics.graph_recall_at_k(node_logits_total, node_gt_total, 5)
+                        # node_language_labels = [dataset.metadata["object_id_to_name"][idx] for idx in range(dataset.num_object_labels)]
+                        # node_confusion_matrix = metrics.confusion_matrix(node_logits_total, node_gt_total, labels=node_language_labels)
+                        # edge_confusion_matrix = metrics.confusion_matrix(edge_logits_total, edge_gt_total, labels=edge_language_labels)
 
 
                 avg_loss = sum(losses)/len(losses)
