@@ -79,6 +79,7 @@ def multi_gpu_train(rank, world_size, config):
 
 def train(device, config):
     wandb.init(project="scenegraphgeneration-isaac", group="DDP", config=config)
+    run_name = f'{wandb.run.name}_{wandb.run.id}'
     generator1 = torch.Generator().manual_seed(42)
     multi_gpu = config["multi_gpu"]
 
@@ -89,6 +90,7 @@ def train(device, config):
     # root_dir = "/home/jack/research/scene_graph/spatio_temporal_sg"
     root_data_dir = config['root_data_dir']
     root_dir = config['root_dir']
+    os.mkdir(os.path.join(root_dir, 'ckpts', run_name))
     preproccess = torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     scale_factor = config['scale_factor']
     batch_size = config['batch_size']
@@ -287,10 +289,10 @@ def train(device, config):
                     
             if (multi_gpu and device == 0) and step % save_interval == 0:
                 timestr = time.strftime("%Y_%m_%d-%H_%M_%S")
-                torch.save(model.module.state_dict(), f"ckpts/loss_{avg_loss}_{timestr}.pt")
+                torch.save(model.module.state_dict(), f"{run_name}/ckpts/loss_{avg_loss}_{timestr}.pt")
             elif not multi_gpu and step % save_interval == 0:
                 timestr = time.strftime("%Y_%m_%d-%H_%M_%S")
-                torch.save(model.state_dict(), os.path.join(root_dir, f"ckpts/loss_{avg_loss}_{timestr}.pt"))
+                torch.save(model.state_dict(), os.path.join(root_dir, f"ckpts/{run_name}/loss_{avg_loss}_{timestr}.pt"))
             step += 1
 
     if multi_gpu:
