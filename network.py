@@ -315,7 +315,8 @@ class IterativeMessagePoolingPassingLayer(nn.Module):
 
         
         
-        return (node_hidden, edge_hidden)
+        return (node_hiddens[-1].reshape(batch_size, -1, self.node_latent_dim),
+                edge_hiddens[-1].reshape(batch_size, -1, self.edge_latent_dim))
 
 class SceneGraphExtractor(nn.Module):
 

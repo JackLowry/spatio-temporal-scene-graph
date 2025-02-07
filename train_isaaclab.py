@@ -1,3 +1,4 @@
+import metrics
 import torch
 import torchvision
 from torch.utils.data import DataLoader
@@ -84,8 +85,10 @@ def train(device, config):
     #process dataset
     # root_data_dir = "/mmfs1/home/jrl712/amazon_home/data/isaaclab_sg_1000"
     # root_dir = "/mmfs1/home/jrl712/amazon_home/scene_graph/spatio-temporal-scene-graph"
-    root_data_dir = "/home/jack/research/data/isaaclab_sg/01-31-2025:14-46-04"
-    root_dir = "/home/jack/research/scene_graph/spatio_temporal_sg"
+    # root_data_dir = "/home/jack/research/data/isaaclab_sg/01-31-2025:14-46-04"
+    # root_dir = "/home/jack/research/scene_graph/spatio_temporal_sg"
+    root_data_dir = config['root_data_dir']
+    root_dir = config['root_dir']
     preproccess = torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     scale_factor = config['scale_factor']
     batch_size = config['batch_size']
@@ -201,6 +204,11 @@ def train(device, config):
                         num_correct_edge = 0
                         num_total_node = 0
                         num_total_edge = 0
+                        node_logits_total = []
+                        edge_logits_total = []
+                        node_gt_total = []
+                        edge_gt_total = []
+                        
                         for test_batch in (pbar := tqdm(test_dataloader, leave=False)):
 
                             batch_rgb = batch["image"].to(device).to(torch.float)
@@ -217,15 +225,13 @@ def train(device, config):
                             edge_loss = edge_label_loss_metric(edge_labels.permute(0, 2, 1), gt_edge_label.long())
                             pos_loss = pos_loss_metric(relative_position, gt_pos)
 
-                            pred_node_labels = torch.argmax(nn.functional.softmax(node_labels, dim=-1), dim=-1)
-                            pred_edge_labels = torch.argmax(nn.functional.softmax(edge_labels, dim=-1), dim=-1)
+                            pred_node_logits = nn.functional.softmax(node_labels, dim=-1)
+                            node_logits_total.append(pred_edge_logits.cpu())
+                            pred_edge_logits = nn.functional.softmax(edge_labels, dim=-1)
+                            edge_logits_total.append(pred_edge_logits.cpu())
 
-                            num_correct_node += torch.sum(pred_node_labels == gt_node_label)
-                            num_total_node += gt_node_label.shape[0]*gt_node_label.shape[1]
-                            num_correct_edge += torch.sum(pred_edge_labels == gt_edge_label)
-                            num_total_edge += gt_edge_label.shape[0]*gt_edge_label.shape[1]
-
-                            # import pdb; pdb.set_trace()
+                            node_gt_total.append(gt_node_label.cpu())
+                            edge_gt_total.append(gt_edge_label.cpu())
 
                             test_node_loss.append(node_loss)
                             test_edge_loss.append(edge_loss)
@@ -235,10 +241,18 @@ def train(device, config):
                         avg_test_node_loss = sum(test_node_loss)/len(test_node_loss)
                         avg_test_edge_loss = sum(test_edge_loss)/len(test_edge_loss)
                         avg_test_pos_loss = sum(test_dist_loss)/len(test_dist_loss)
-                        node_accuracy = num_correct_node/num_total_node
-                        node_accuracy = node_accuracy.item()
-                        edge_accuracy = num_correct_edge/num_total_edge
-                        edge_accuracy = edge_accuracy.item()
+
+                        node_logits_total = torch.concat(node_logits_total)
+                        edge_logits_total = torch.concat(edge_logits_total)
+                        node_gt_total = torch.concat(node_gt_total)
+                        edge_gt_total = torch.concat(edge_gt_total)
+
+                        node_f1 = metrics.f1_score(node_logits_total, node_gt_total)
+                        edge_f1 = metrics.f1_score(edge_logits_total, edge_gt_total)
+                        node_recall_at_5 = metrics.recall_at_k(node_logits_total, node_gt_total, 5)
+                        node_language_labels = [dataset.metadata["object_id_to_name"][idx] for idx in range(dataset.num_object_labels)]
+                        node_confusion_matrix = metrics.confusion_matrix(node_logits_total, node_gt_total, labels=node_language_labels)
+                        edge_confusion_matrix = metrics.confusion_matrix(edge_logits_total, edge_gt_total, labels=edge_language_labels)
 
 
                 avg_loss = sum(losses)/len(losses)
@@ -265,7 +279,8 @@ def train(device, config):
                 if (not multi_gpu or device == 0) and step % eval_interval != 0:
                     wandb.log({"train/loss": avg_loss, "train/node_loss": avg_node_loss, "train/edge_loss": avg_edge_loss, "train/pos_loss": pos_loss, "img": img})
                 else:
-                    wandb.log({"test/node_accuracy": node_accuracy, "test/edge_accuracy": edge_accuracy,
+                    wandb.log({"test/node_f1_score": node_f1, "test/edge_f1_score": edge_f1,
+                               "test/node_recall@5": node_recall_at_5,
                             "train/loss": avg_loss, "train/node_loss": avg_node_loss, "train/edge_loss": avg_edge_loss, "train/pos_loss": pos_loss, 
                             "test/loss": avg_test_loss, "test/node_loss": avg_test_node_loss, "test/edge_loss": avg_test_edge_loss, 
                             "test/pos_loss": avg_test_pos_loss, "img": img})

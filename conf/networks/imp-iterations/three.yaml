@@ -1,0 +1,9 @@
+# @package _global_
+defaults:
+  - /default
+  - _self_
+
+network_config: 
+  encoder_model: "iterative-message-passing"
+  feature_extractor: "resnet_fpn"
+  iterations: 3
