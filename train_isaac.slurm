@@ -5,7 +5,7 @@
 #SBATCH --mail-user=jrl712@uw.edu
 
 #SBATCH --account=sciencehub
-#SBATCH --partition=gpu-a40
+#SBATCH --partition=ckpt
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --mem=64G
