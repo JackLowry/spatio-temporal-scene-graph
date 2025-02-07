@@ -125,7 +125,7 @@ class MLP(nn.Module):
 
 class SceneGraphGenerator(nn.Module):
 
-    def __init__(self, batch_size, num_nodes, network_args):
+    def __init__(self, num_nodes, network_args):
         super(SceneGraphGenerator, self).__init__()
 
         self.feature_extractor_type = network_args['feature_extractor']
@@ -140,7 +140,6 @@ class SceneGraphGenerator(nn.Module):
         self.num_edges = num_nodes*(num_nodes-1)
 
         self.use_gpu = True
-        self.batch_size = batch_size
         self.encoder_model = network_args['encoder_model']
         self.latent_size = network_args['latent_size']
 
@@ -158,7 +157,7 @@ class SceneGraphGenerator(nn.Module):
         elif self.encoder_model == 'iterative-message-passing':
             #kwargs:
             # iterations: number of message passing iterations
-            self.encoder = IterativeMessagePoolingPassingLayer(self.batch_size, self.embedding_dim, self.latent_size, self.latent_size, network_args['iterations'])
+            self.encoder = IterativeMessagePoolingPassingLayer(num_nodes, self.embedding_dim, self.latent_size, self.latent_size, network_args['iterations'])
         
         # self.node_latent_downscaler = ops.MLP(128, [256, 64], dropout=0.2)
 
@@ -226,7 +225,7 @@ class SceneGraphGenerator(nn.Module):
 
 #implement message pooling & passing from Scene Graph Generation by Iterative Message Passing (Xu et al)
 class IterativeMessagePoolingPassingLayer(nn.Module):
-    def __init__(self, batch_size, embedding_dim, node_latent_dim, edge_latent_dim, iterations):
+    def __init__(self, num_nodes, embedding_dim, node_latent_dim, edge_latent_dim, iterations):
         super(IterativeMessagePoolingPassingLayer, self).__init__()
 
         self.node_gru = nn.GRUCell(node_latent_dim, node_latent_dim)
@@ -240,7 +239,8 @@ class IterativeMessagePoolingPassingLayer(nn.Module):
         self.node_latent_dim = node_latent_dim
         self.edge_latent_dim = edge_latent_dim
         self.embedding_dim = embedding_dim
-        self.batch_size = batch_size
+        self.num_nodes = num_nodes
+        self.num_edges = num_nodes*(num_nodes-1)
         self.iterations=iterations
 
         self.node_cnn= CNN_Encoder(embedding_dim, [1024,self.node_latent_dim], [2,2])
@@ -261,23 +261,21 @@ class IterativeMessagePoolingPassingLayer(nn.Module):
         node_hiddens = [node_hidden.clone()]
         edge_hiddens = [edge_hidden.clone()]
 
-        num_nodes = node_latents.shape[0]//self.batch_size
-        num_edges = edge_latents.shape[0]//self.batch_size
-
+        batch_size = node_latents.shape[0]//self.num_nodes
 
         #mapping of which nodes are connected to which edges
-        node_edge_mat = torch.zeros(self.batch_size, num_nodes, num_edges).to(node_latents.device)
-        batch_idxs = torch.arange(self.batch_size).repeat_interleave(2*num_edges).to(torch.long).to(node_latents.device)
+        node_edge_mat = torch.zeros(batch_size, self.num_nodes, self.num_edges).to(node_latents.device)
+        batch_idxs = torch.arange(batch_size).repeat_interleave(2*self.num_edges).to(torch.long).to(node_latents.device)
         node_idxs = edge_idx_to_node_idxs[:, :, 1:].reshape(-1).to(torch.long).to(node_latents.device)
-        edge_idxs = torch.arange(num_edges).repeat_interleave(2).tile((self.batch_size)).to(node_latents.device)
+        edge_idxs = torch.arange(self.num_edges).repeat_interleave(2).tile((batch_size)).to(node_latents.device)
         
         node_edge_mat[batch_idxs, node_idxs, edge_idxs] = 1.0
 
         for i in range(self.iterations):
             node_hidden = node_hiddens[-1].clone()
             edge_hidden = edge_hiddens[-1].clone()
-            node_hidden = node_hidden.reshape(self.batch_size, -1, self.node_latent_dim)
-            edge_hidden = edge_hidden.reshape(self.batch_size, -1, self.edge_latent_dim)
+            node_hidden = node_hidden.reshape(batch_size, -1, self.node_latent_dim)
+            edge_hidden = edge_hidden.reshape(batch_size, -1, self.edge_latent_dim)
 
             nodes_repeated_subject = torch.gather(
                 node_hidden,
@@ -390,7 +388,7 @@ class StowTrainSceneGraphModel(nn.Module):
             dropout = network_args['dropout']
             latent_size = network_args['latent_size']
 
-            self.generator = SceneGraphGenerator(batch_size, num_nodes, network_args)
+            self.generator = SceneGraphGenerator(num_nodes, network_args)
             
             self.node_label_extractor = MLP(latent_size, [latent_size//2, latent_size//4, num_node_labels], dropout)
             self.edge_label_extractor = MLP(latent_size, [latent_size//2, latent_size//4, num_edge_labels], dropout)

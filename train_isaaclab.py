@@ -84,10 +84,8 @@ def train(device, config):
     #process dataset
     # root_data_dir = "/mmfs1/home/jrl712/amazon_home/data/isaaclab_sg_1000"
     # root_dir = "/mmfs1/home/jrl712/amazon_home/scene_graph/spatio-temporal-scene-graph"
-    # root_data_dir = "/home/jack/research/data/isaaclab_sg/01-31-2025:14-46-04"
-    # root_dir = "/home/jack/research/scene_graph/spatio_temporal_sg"
-    root_data_dir = config['root_data_dir']
-    root_dir = config['root_dir']
+    root_data_dir = "/home/jack/research/data/isaaclab_sg/01-31-2025:14-46-04"
+    root_dir = "/home/jack/research/scene_graph/spatio_temporal_sg"
     preproccess = torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     scale_factor = config['scale_factor']
     batch_size = config['batch_size']
