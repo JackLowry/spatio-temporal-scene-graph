@@ -163,7 +163,8 @@ class SceneGraphGenerator(nn.Module):
 
 
 
-    def forward(self, image, object_bounding_boxes, union_bounding_boxes, edge_idx_to_node_idxs):
+    def forward(self, image, object_bounding_boxes, union_bounding_boxes, edge_idx_to_node_idxs,
+                node_network_mask, edge_network_mask):
 
         image_features = self.extractor(image)
 
@@ -205,7 +206,8 @@ class SceneGraphGenerator(nn.Module):
             # edge_features = edge_features.reshape(edge_features.shape[0], edge_features.shape[1], -1, )
             
         if self.encoder_model == 'iterative-message-passing':
-            node_latents, edge_latents = self.encoder(object_features, edge_features, edge_idx_to_node_idxs)
+            node_latents, edge_latents = self.encoder(object_features, edge_features, edge_idx_to_node_idxs,
+                                                      node_network_mask, edge_network_mask)
         else:
             if self.encoder_model == 'lstm':
                 object_features = object_features.reshape((batch_size, num_objects, -1))
@@ -247,7 +249,8 @@ class IterativeMessagePoolingPassingLayer(nn.Module):
         self.edge_cnn = CNN_Encoder(embedding_dim, [1024,self.edge_latent_dim], [2,2])
 
 
-    def forward(self, node_latents, edge_latents, edge_idx_to_node_idxs):
+    def forward(self, node_latents, edge_latents, edge_idx_to_node_idxs,
+                node_network_mask, edge_network_mask):
 
         node_latents = self.node_cnn(node_latents)
         edge_latents = self.edge_cnn(edge_latents)
@@ -400,9 +403,11 @@ class StowTrainSceneGraphModel(nn.Module):
         # def reset_model(self):
 
 
-        def forward(self, image, object_bounding_boxes, union_bounding_boxes, edge_idx_to_node_idxs):
+        def forward(self, image, object_bounding_boxes, union_bounding_boxes, edge_idx_to_node_idxs,
+                    node_network_mask, edge_network_mask):
 
-            node_latents, edge_latents = self.generator(image, object_bounding_boxes, union_bounding_boxes, edge_idx_to_node_idxs)
+            node_latents, edge_latents = self.generator(image, object_bounding_boxes, union_bounding_boxes, edge_idx_to_node_idxs,
+                                                        node_network_mask, edge_network_mask)
 
             node_labels = self.node_label_extractor(node_latents)
             edge_labels = self.edge_label_extractor(edge_latents)

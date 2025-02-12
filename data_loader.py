@@ -500,6 +500,7 @@ class IsaacLabDataset(Dataset):
         training_idx_counter = 0
 
         object_data = []
+        node_network_mask = []
         for object in graph["nodes"].keys():
             
             bbox = graph["nodes"][object]["bbox"]
@@ -512,10 +513,12 @@ class IsaacLabDataset(Dataset):
 
             object_label = self.metadata['node_data'][graph["nodes"][object]["class_name"]]['id']     
 
+
             object_data.append({
                 "bbox": bbox.to(torch.float),
                 "object_label": torch.Tensor([object_label]).to(torch.int32)
-            })      
+            })     
+            node_network_mask.append(1) 
 
             object_to_idx[object] = len(object_data) - 1
 
@@ -527,10 +530,13 @@ class IsaacLabDataset(Dataset):
                 "bbox": torch.zeros((1,4)).cuda().to(torch.float),
                 "object_label": torch.Tensor([self.no_object_label])
             })      
+            node_network_mask.append(0)
 
         relation_data = [None]*(self.num_objects*(self.num_objects))
 
         edge_idx_to_node_idxs = [None]*(self.num_objects*(self.num_objects))
+
+        edge_network_mask = [0]*(self.num_objects*(self.num_objects))
 
         for relation_tuple in graph["edges"].keys():
             # import pdb; pdb.set_trace()
@@ -545,6 +551,7 @@ class IsaacLabDataset(Dataset):
 
             relation_data_idx = object_to_training_idxs[subject]*self.num_objects + object_to_idx[object]
             edge_idx_to_node_idxs[relation_data_idx] = [relation_data_idx, object_to_idx[subject_id], object_to_idx[object_id]]
+            edge_network_mask[relation_data_idx] = 1
 
             bbox = graph["edges"][relation_tuple]["bbox"]
             bbox = torch.Tensor(bbox).unsqueeze(0).cuda()
@@ -580,6 +587,8 @@ class IsaacLabDataset(Dataset):
             "edges": relation_ret_data,
             "image": image,
             "orig_image": orig_image,
-            "edge_idx_to_node_idxs": edge_idx_to_node_idxs
+            "edge_idx_to_node_idxs": edge_idx_to_node_idxs,
+            "node_network_mask": node_network_mask
+            "edge_network_mask": edge_network_mask
         }
         return return_data

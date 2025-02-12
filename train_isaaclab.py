@@ -164,6 +164,9 @@ def train(device, config):
             gt_node_label = batch["nodes"]["object_label"].to(device)
             gt_edge_label = batch["edges"]["relationship_label"].to(device)
             gt_pos = batch["edges"]["dist"].to(device)
+            
+            batch_node_network_mask = batch['node_network_mask'].to(device)
+            batch_edge_network_mask = batch['edge_network_mask'].to(device)
 
             # import pdb; pdb.set_trace
             # (batch_images, batch_object_bbox, batch_union_bbox, node_parameters, edge_parameters) \
@@ -173,7 +176,12 @@ def train(device, config):
             # not_visible = gt_visible == 0
             # gt_pos[not_visible] = torch.zeros((3)).to(device)
 
-            node_labels, edge_labels, relative_position = model(batch_images, batch_object_bbox, batch_union_bbox, batch_edge_idx_to_node_idxs)
+            node_labels, edge_labels, relative_position = model(batch_images, 
+                                                                batch_object_bbox, 
+                                                                batch_union_bbox, 
+                                                                batch_edge_idx_to_node_idxs,
+                                                                batch_node_network_mask,
+                                                                batch_edge_network_mask)
 
             node_loss = node_label_loss_metric(node_labels.permute(0, 2, 1), gt_node_label.long())
             edge_loss = edge_label_loss_metric(edge_labels.permute(0, 2, 1), gt_edge_label.long())
