@@ -518,7 +518,10 @@ class IsaacLabDataset(Dataset):
                 "bbox": bbox.to(torch.float),
                 "object_label": torch.Tensor([object_label]).to(torch.int32)
             })     
-            node_network_mask.append(1) 
+            if object_label == self.metadata['node_data']["None"]['id']:
+                node_network_mask.append(0)
+            else:
+                node_network_mask.append(1) 
 
             object_to_idx[object] = len(object_data) - 1
 
@@ -532,11 +535,13 @@ class IsaacLabDataset(Dataset):
             })      
             node_network_mask.append(0)
 
+        node_network_mask = torch.Tensor(node_network_mask) == 1
+
         relation_data = [None]*(self.num_objects*(self.num_objects))
 
         edge_idx_to_node_idxs = [None]*(self.num_objects*(self.num_objects))
 
-        edge_network_mask = [0]*(self.num_objects*(self.num_objects))
+        edge_network_mask = [False]*(self.num_objects*(self.num_objects))
 
         for relation_tuple in graph["edges"].keys():
             # import pdb; pdb.set_trace()
@@ -551,7 +556,10 @@ class IsaacLabDataset(Dataset):
 
             relation_data_idx = object_to_training_idxs[subject]*self.num_objects + object_to_idx[object]
             edge_idx_to_node_idxs[relation_data_idx] = [relation_data_idx, object_to_idx[subject_id], object_to_idx[object_id]]
-            edge_network_mask[relation_data_idx] = 1
+            if node_network_mask[object_to_idx[subject_id]] == 0 or node_network_mask[object_to_idx[object_id]] == 0:
+                edge_network_mask[relation_data_idx] = False
+            else:
+                edge_network_mask[relation_data_idx] = True
 
             bbox = graph["edges"][relation_tuple]["bbox"]
             bbox = torch.Tensor(bbox).unsqueeze(0).cuda()
@@ -567,9 +575,11 @@ class IsaacLabDataset(Dataset):
                 "dist": dist
             }
 
+        edge_network_mask = [edge_network_mask[i] for i in range(len(edge_network_mask)) if relation_data[i]  is not None]
         relation_data = [relation_data[i] for i in range(len(relation_data)) if relation_data[i] is not None]
         edge_idx_to_node_idxs = [edge_idx_to_node_idxs[i] for i in range(len(edge_idx_to_node_idxs)) if edge_idx_to_node_idxs[i] is not None]
         edge_idx_to_node_idxs = torch.Tensor(edge_idx_to_node_idxs)
+        edge_network_mask = torch.Tensor(edge_network_mask) == 1
 
         object_ret_data  = {
             "bbox": torch.concat([o["bbox"] for o in object_data]),
@@ -588,7 +598,7 @@ class IsaacLabDataset(Dataset):
             "image": image,
             "orig_image": orig_image,
             "edge_idx_to_node_idxs": edge_idx_to_node_idxs,
-            "node_network_mask": node_network_mask
+            "node_network_mask": node_network_mask,
             "edge_network_mask": edge_network_mask
         }
         return return_data

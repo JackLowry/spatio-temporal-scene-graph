@@ -183,9 +183,25 @@ def train(device, config):
                                                                 batch_node_network_mask,
                                                                 batch_edge_network_mask)
 
-            node_loss = node_label_loss_metric(node_labels.permute(0, 2, 1), gt_node_label.long())
-            edge_loss = edge_label_loss_metric(edge_labels.permute(0, 2, 1), gt_edge_label.long())
-            pos_loss = pos_loss_metric(relative_position, gt_pos)
+            node_labels = node_labels.reshape(-1, node_labels.shape[-1])
+            gt_node_label = gt_node_label.reshape(-1)
+            batch_node_network_mask = batch_node_network_mask.reshape(-1)
+            
+            edge_labels = edge_labels.reshape(-1, edge_labels.shape[-1])
+            gt_edge_label = gt_edge_label.reshape(-1)
+            batch_edge_network_mask = batch_edge_network_mask.reshape(-1)
+
+
+            relative_position = relative_position.reshape(-1, relative_position.shape[-1])
+            gt_pos = gt_pos.reshape(-1, gt_pos.shape[-1])
+
+
+
+            node_loss = node_label_loss_metric(node_labels[batch_node_network_mask], gt_node_label.long()[batch_node_network_mask])
+            edge_loss = edge_label_loss_metric(edge_labels[batch_edge_network_mask], gt_edge_label.long()[batch_edge_network_mask])
+            edge_loss[torch.isnan(edge_loss)] = 0.0
+            pos_loss = pos_loss_metric(relative_position[batch_edge_network_mask], gt_pos[batch_edge_network_mask])
+            pos_loss[torch.isnan(pos_loss)] = 0.0
 
             loss = node_loss + edge_loss + pos_loss
 
@@ -218,6 +234,7 @@ def train(device, config):
                         edge_logits_total = []
                         node_gt_total = []
                         edge_gt_total = []
+                        num_edge_samples = 0
                         
                         for test_batch in (pbar := tqdm(test_dataloader, leave=False)):
 
@@ -229,28 +246,50 @@ def train(device, config):
                             gt_node_label = batch["nodes"]["object_label"].to(device)
                             gt_edge_label = batch["edges"]["relationship_label"].to(device)
                             gt_pos = batch["edges"]["dist"].to(device)
+            
+                            batch_node_network_mask = batch['node_network_mask'].to(device)
+                            batch_edge_network_mask = batch['edge_network_mask'].to(device)
+                            node_labels, edge_labels, relative_position = model(batch_images, batch_object_bbox, batch_union_bbox, batch_edge_idx_to_node_idxs,
+                                                                                batch_node_network_mask, batch_edge_network_mask)
+                            node_labels = node_labels.reshape(-1, node_labels.shape[-1])
+                            gt_node_label = gt_node_label.reshape(-1)
+                            batch_node_network_mask = batch_node_network_mask.reshape(-1)
+                            
+                            edge_labels = edge_labels.reshape(-1, edge_labels.shape[-1])
+                            gt_edge_label = gt_edge_label.reshape(-1)
+                            batch_edge_network_mask = batch_edge_network_mask.reshape(-1)
 
-                            node_labels, edge_labels, relative_position = model(batch_images, batch_object_bbox, batch_union_bbox, batch_edge_idx_to_node_idxs)
-                            node_loss = node_label_loss_metric(node_labels.permute(0, 2, 1), gt_node_label.long())
-                            edge_loss = edge_label_loss_metric(edge_labels.permute(0, 2, 1), gt_edge_label.long())
-                            pos_loss = pos_loss_metric(relative_position, gt_pos)
 
-                            pred_node_logits = nn.functional.softmax(node_labels, dim=-1)
+                            relative_position = relative_position.reshape(-1, relative_position.shape[-1])
+                            gt_pos = gt_pos.reshape(-1, gt_pos.shape[-1])
+
+                            node_loss = node_label_loss_metric(node_labels[batch_node_network_mask], gt_node_label.long()[batch_node_network_mask])
+                            edge_loss = edge_label_loss_metric(edge_labels[batch_edge_network_mask], gt_edge_label.long()[batch_edge_network_mask])
+                            edge_loss[torch.isnan(edge_loss)] = 0.0
+                            pos_loss = pos_loss_metric(relative_position[batch_edge_network_mask], gt_pos[batch_edge_network_mask])
+                            pos_loss[torch.isnan(pos_loss)] = 0.0
+
+
+                            pred_node_logits = nn.functional.softmax(node_labels[batch_node_network_mask], dim=-1)
                             node_logits_total.append(pred_node_logits.cpu())
-                            pred_edge_logits = nn.functional.softmax(edge_labels, dim=-1)
-                            edge_logits_total.append(pred_edge_logits.cpu())
 
-                            node_gt_total.append(gt_node_label.cpu().to(torch.long))
-                            edge_gt_total.append(gt_edge_label.cpu().to(torch.long))
+                            node_gt_total.append(gt_node_label[batch_node_network_mask].cpu().to(torch.long))
+
+                            #only compute f1 score if there are valid edges
+                            if batch_edge_network_mask.any():
+                                pred_edge_logits = nn.functional.softmax(edge_labels[batch_edge_network_mask], dim=-1)
+                                edge_logits_total.append(pred_edge_logits.cpu())
+                                edge_gt_total.append(gt_edge_label[batch_edge_network_mask].cpu().to(torch.long))
 
                             test_node_loss.append(node_loss)
                             test_edge_loss.append(edge_loss)
                             test_dist_loss.append(pos_loss)
+                            num_edge_samples += batch_edge_network_mask.sum().cpu().item()
                             test_loss.append(pos_loss)
                         avg_test_loss = sum(test_loss)/len(test_loss)
                         avg_test_node_loss = sum(test_node_loss)/len(test_node_loss)
                         avg_test_edge_loss = sum(test_edge_loss)/len(test_edge_loss)
-                        avg_test_pos_loss = sum(test_dist_loss)/len(test_dist_loss)
+                        avg_test_pos_loss = sum(test_dist_loss)/num_edge_samples
 
                         node_logits_total = torch.concat(node_logits_total)
                         edge_logits_total = torch.concat(edge_logits_total)
@@ -280,7 +319,7 @@ def train(device, config):
                 # node_viz_image = wandb.Image("nodes.png")
                 # edge_viz_image = wandb.Image("edges.png")
 
-                node_labels_viz = node_labels[0]
+                node_labels_viz = node_labels[0:dataset.num_objects]
                 node_labels_viz = torch.argmax(nn.functional.softmax(node_labels_viz, dim=-1), dim=-1)
                 img_language_labels = [dataset.metadata["object_id_to_name"][idx.cpu().item()] for idx in node_labels_viz]
                 img = draw_image(batch["orig_image"][0], batch_object_bbox.cpu()[0]*(1/scale_factor), img_language_labels)
