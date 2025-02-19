@@ -602,3 +602,189 @@ class IsaacLabDataset(Dataset):
             "edge_network_mask": edge_network_mask
         }
         return return_data
+    
+class IsaacLabSequenceDataset(Dataset):
+ 
+    def __init__(self, root_dir, scale_factor=1, transform=None):
+        """
+        Arguments:
+            root_dir (string): Directory with all the images.
+            transform (callable, optional): Optional transform to be applied
+                on a sample.
+        """
+        self.root_dir = root_dir
+        self.transform = transform
+
+        self.num_scenes = len(os.listdir(root_dir)) - 1
+        self.num_objects = len(os.listdir(os.path.join(root_dir, '0')))
+
+        with open(os.path.join(root_dir, "metadata.json"), 'r') as f:
+            self.metadata = json.load(f)
+
+        self.metadata["object_id_to_name"] = {
+            v['id']:k for k,v in self.metadata["node_data"].items()
+        }
+        
+        self.no_object_label = 0
+        self.no_relationship_label = 0
+        self.num_object_labels = len(list(self.metadata["node_data"].keys()))
+        self.num_relationship_labels = 7#len(list(self.metadata["edge_data"].keys()))
+
+        self.num_graphs = self.num_scenes * self.num_objects
+        self.scale_factor = scale_factor
+
+    def __len__(self):
+        return self.num_scenes
+
+    def __getitem__(self, scene_idx):
+
+        sequence_object_ret_data = []
+        sequence_relation_ret_data = []
+        sequence_image = []
+        sequence_orig_image = []
+        sequence_edge_idx_to_node_idxs = []
+        sequence_node_network_mask = []
+        sequence_edge_network_mask = []
+
+        for object_idx in range(self.num_objects):
+            item_path = os.path.join(self.root_dir, str(scene_idx), f"t_{object_idx}.pkl")
+            with open(item_path, 'rb') as f:
+                sample = pickle.load(f)
+
+
+
+            image = sample["images"]["rgb"][0].to(torch.float32)/255
+            
+            image = torch.Tensor(image)
+
+            graph = sample["graph"][0]
+
+            #channel first
+            image = image.permute((2,0,1))
+            orig_image = image.clone()
+            image = image.to(torch.float32)
+            # resize
+            if self.scale_factor != 1:
+                desired_size = (round(image.shape[-2]*self.scale_factor), round(image.shape[-1]*self.scale_factor))
+                image = torchvision.transforms.functional.resize(image, desired_size)
+            
+            #apply transformations, don't understand why [0] is required
+            image = self.transform[0](image)
+        
+            image = image.cuda()
+
+            object_to_idx = {}
+
+            object_to_training_idxs = {}
+            training_idx_counter = 0
+
+            object_data = []
+            node_network_mask = []
+            for object in graph["nodes"].keys():
+                
+                bbox = graph["nodes"][object]["bbox"]
+                bbox = torch.tensor(bbox)
+
+                #scale according to scale factor
+                bbox = bbox*self.scale_factor
+                bbox = torch.round(bbox)
+                bbox = bbox.unsqueeze(0).cuda()
+
+                object_label = self.metadata['node_data'][graph["nodes"][object]["class_name"]]['id']     
+
+
+                object_data.append({
+                    "bbox": bbox.to(torch.float),
+                    "object_label": torch.Tensor([object_label]).to(torch.int32)
+                })     
+                if object_label == self.metadata['node_data']["None"]['id']:
+                    node_network_mask.append(0)
+                else:
+                    node_network_mask.append(1) 
+
+                object_to_idx[object] = len(object_data) - 1
+
+                object_to_training_idxs[object] = training_idx_counter
+                training_idx_counter += 1 
+
+            while len(object_data) < self.num_objects:
+                object_data.append({
+                    "bbox": torch.zeros((1,4)).cuda().to(torch.float),
+                    "object_label": torch.Tensor([self.no_object_label])
+                })      
+                node_network_mask.append(0)
+
+            node_network_mask = torch.Tensor(node_network_mask) == 1
+
+            relation_data = [None]*(self.num_objects*(self.num_objects))
+
+            edge_idx_to_node_idxs = [None]*(self.num_objects*(self.num_objects))
+
+            edge_network_mask = [False]*(self.num_objects*(self.num_objects))
+
+            for relation_tuple in graph["edges"].keys():
+                # import pdb; pdb.set_trace()
+
+                relationship_label = graph["edges"][relation_tuple]["name"]
+                relation = graph["edges"][relation_tuple]["relation_id"]
+                subject_id = relation_tuple[0]
+                object_id = relation_tuple[1]
+                    
+                subject = relation_tuple[0]
+                object = relation_tuple[1]
+
+                relation_data_idx = object_to_training_idxs[subject]*self.num_objects + object_to_idx[object]
+                edge_idx_to_node_idxs[relation_data_idx] = [relation_data_idx, object_to_idx[subject_id], object_to_idx[object_id]]
+                if node_network_mask[object_to_idx[subject_id]] == 0 or node_network_mask[object_to_idx[object_id]] == 0:
+                    edge_network_mask[relation_data_idx] = False
+                else:
+                    edge_network_mask[relation_data_idx] = True
+
+                bbox = graph["edges"][relation_tuple]["bbox"]
+                bbox = torch.Tensor(bbox).unsqueeze(0).cuda()
+                bbox = bbox*self.scale_factor
+                bbox = torch.round(bbox)
+
+                dist = graph["edges"][relation_tuple]["xyz_offset"]
+                dist = torch.Tensor(dist).squeeze().unsqueeze(0).cuda()
+
+                relation_data[relation_data_idx] = {
+                    "relationship_label": torch.Tensor([relation]),
+                    "bbox": bbox.to(torch.float),
+                    "dist": dist
+                }
+
+            edge_network_mask = [edge_network_mask[i] for i in range(len(edge_network_mask)) if relation_data[i]  is not None]
+            relation_data = [relation_data[i] for i in range(len(relation_data)) if relation_data[i] is not None]
+            edge_idx_to_node_idxs = [edge_idx_to_node_idxs[i] for i in range(len(edge_idx_to_node_idxs)) if edge_idx_to_node_idxs[i] is not None]
+            edge_idx_to_node_idxs = torch.Tensor(edge_idx_to_node_idxs)
+            edge_network_mask = torch.Tensor(edge_network_mask) == 1
+
+            object_ret_data  = {
+                "bbox": torch.concat([o["bbox"] for o in object_data]),
+                "object_label": torch.concat([o["object_label"] for o in object_data])
+            }
+
+            relation_ret_data = {
+                "relationship_label": torch.concat([e["relationship_label"] for e in relation_data]),
+                "bbox": torch.concat([e["bbox"] for e in relation_data]),
+                "dist": torch.concat([e["dist"] for e in relation_data]),
+            }
+            sequence_object_ret_data.append(object_ret_data)
+            sequence_relation_ret_data.append(relation_ret_data)
+            sequence_image.append(image)
+            sequence_orig_image.append(orig_image)
+            sequence_edge_idx_to_node_idxs.append(edge_idx_to_node_idxs)
+            sequence_node_network_mask.append(node_network_mask)
+            sequence_edge_network_mask.append(edge_network_mask)
+
+        return_data = {
+            "nodes": sequence_object_ret_data,
+            "edges": sequence_relation_ret_data,
+            "image": sequence_image,
+            "orig_image": sequence_orig_image,
+            "edge_idx_to_node_idxs": sequence_edge_idx_to_node_idxs,
+            "node_network_mask": sequence_node_network_mask,
+            "edge_network_mask": sequence_edge_network_mask
+        }
+        return return_data
