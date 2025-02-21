@@ -6,7 +6,7 @@ import torchvision.ops as ops
 import torchvision
 
 from network import MLP, BiLSTM_Encoder, CNN_Encoder, IterativeMessagePoolingPassingLayer, RGBFeatureExtractor, SceneGraphGenerator
-
+from positional_encodings.torch_encodings import PositionalEncoding2D, Summer
 
 class TemporalSceneGraphModel(nn.Module):
         #num_lstm_layers=1, latent_size=512, dropout=0.5, encoder_model="lstm", feature_extractor="dino"
@@ -186,6 +186,9 @@ class TemporalIterativeMessagePoolingPassingLayer(nn.Module):
         self.node_cnn= CNN_Encoder(embedding_dim, [1024,self.node_latent_dim], [2,2])
         self.edge_cnn = CNN_Encoder(embedding_dim, [1024,self.edge_latent_dim], [2,2])
 
+        self.node_attention_head = MultiFrameAttention(node_latent_dim, self.num_nodes, sequence_length)
+        self.edge_attention_head = MultiFrameAttention(edge_latent_dim, self.num_edges, sequence_length)
+
 
     def forward(self, node_latents, edge_latents, edge_idx_to_node_idxs,
                 node_network_mask, edge_network_mask):
@@ -249,6 +252,12 @@ class TemporalIterativeMessagePoolingPassingLayer(nn.Module):
 
             edge_message = edge_message_subject + edge_message_object
 
+            node_message = node_message.reshape(batch_size, self.sequence_length, self.num_nodes, self.node_latent_dim)
+            edge_message = edge_message.reshape(batch_size, self.sequence_length, self.num_edges, self.edge_latent_dim)
+
+            node_message = self.node_attention_head(node_message)
+            edge_message = self.edge_attention_head(edge_message)
+
             node_message = node_message.reshape(-1, self.node_latent_dim)
             edge_message = edge_message.reshape(-1, self.edge_latent_dim)
 
@@ -257,3 +266,37 @@ class TemporalIterativeMessagePoolingPassingLayer(nn.Module):
         
         return (node_hiddens[-1].reshape(batch_size*self.sequence_length, -1, self.node_latent_dim),
                 edge_hiddens[-1].reshape(batch_size*self.sequence_length, -1, self.edge_latent_dim))
+    
+#implement message pooling & passing from Scene Graph Generation by Iterative Message Passing (Xu et al)
+class MultiFrameAttention(nn.Module):
+    def __init__(self, latent_dim, num_graph_elems, num_scenes):
+        super(MultiFrameAttention, self).__init__()
+
+        self.pos_encoding = Summer(PositionalEncoding2D(latent_dim))
+        self.attention_layer = torch.nn.MultiheadAttention(latent_dim, 4, dropout=0.2, batch_first=True)
+
+        #each graph should only attend with itself and past graphs.
+        self.attn_mask = torch.triu(torch.ones((num_scenes, num_scenes)), diagonal=1).cuda()
+        tmp_attn_mask = torch.zeros((num_scenes*num_graph_elems, num_scenes*num_graph_elems)).cuda()
+        for i in range(num_scenes):
+            for j in range(num_scenes):
+                tmp_attn_mask[i*num_graph_elems:(i+1)*num_graph_elems, j*num_graph_elems:(j+1)*num_graph_elems] = \
+                    self.attn_mask[i,j]
+        self.attn_mask = tmp_attn_mask == 1.0
+
+
+    # input is (batch_size, scene_sequence_length, num_graph elems, latent_size)
+    def forward(self, x):
+
+        x_with_positional_embedding = self.pos_encoding(x)
+
+        x_flattened = x_with_positional_embedding.flatten(1, 2)
+
+        attn_output, attn_output_weights = self.attention_layer(x_flattened,
+                                                                x_flattened,
+                                                                x_flattened, 
+                                                                attn_mask=self.attn_mask)
+
+        return attn_output
+
+
