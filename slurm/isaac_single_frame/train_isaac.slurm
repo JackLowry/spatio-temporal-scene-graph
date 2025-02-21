@@ -20,4 +20,4 @@
 # Modules to use (optional).
 
 # Your programs to run.
-apptainer exec --nv --overlay /gscratch/sciencehub/jrl712/conda_overlay3.img:ro /gscratch/sciencehub/jrl712/hyak-container.sif /mmfs1/home/jrl712/amazon_home/scene_graph/spatio-temporal-scene-graph/train_isaac.sh $1
+apptainer exec --nv --overlay /gscratch/sciencehub/jrl712/conda_overlay3.img:ro /gscratch/sciencehub/jrl712/hyak-container.sif /mmfs1/home/jrl712/amazon_home/scene_graph/spatio-temporal-scene-graph/slurm/isaac_single_frame/train_isaac.sh $1

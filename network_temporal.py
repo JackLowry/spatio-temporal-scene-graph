@@ -86,7 +86,7 @@ class TemporalSceneGraphGenerator(nn.Module):
             #kwargs:
             # iterations: number of message passing iterations
             self.encoder = TemporalIterativeMessagePoolingPassingLayer(num_nodes, self.embedding_dim, self.latent_size, self.latent_size, network_args['iterations'],
-                                                                       sequence_length)
+                                                                       sequence_length, network_args["multi_frame_attn"])
         
         # self.node_latent_downscaler = ops.MLP(128, [256, 64], dropout=0.2)
 
@@ -163,7 +163,7 @@ class TemporalSceneGraphGenerator(nn.Module):
 #implement message pooling & passing from Scene Graph Generation by Iterative Message Passing (Xu et al)
 class TemporalIterativeMessagePoolingPassingLayer(nn.Module):
     def __init__(self, num_nodes, embedding_dim, node_latent_dim, edge_latent_dim, iterations,
-                 sequence_length):
+                 sequence_length, use_multi_frame_attn):
         super(TemporalIterativeMessagePoolingPassingLayer, self).__init__()
 
         self.node_gru = nn.GRUCell(node_latent_dim, node_latent_dim)
@@ -188,6 +188,7 @@ class TemporalIterativeMessagePoolingPassingLayer(nn.Module):
 
         self.node_attention_head = MultiFrameAttention(node_latent_dim, self.num_nodes, sequence_length)
         self.edge_attention_head = MultiFrameAttention(edge_latent_dim, self.num_edges, sequence_length)
+        self.use_multi_frame_attn = use_multi_frame_attn
 
 
     def forward(self, node_latents, edge_latents, edge_idx_to_node_idxs,
@@ -252,11 +253,12 @@ class TemporalIterativeMessagePoolingPassingLayer(nn.Module):
 
             edge_message = edge_message_subject + edge_message_object
 
-            node_message = node_message.reshape(batch_size, self.sequence_length, self.num_nodes, self.node_latent_dim)
-            edge_message = edge_message.reshape(batch_size, self.sequence_length, self.num_edges, self.edge_latent_dim)
+            if self.use_multi_frame_attn:
+                node_message = node_message.reshape(batch_size, self.sequence_length, self.num_nodes, self.node_latent_dim)
+                edge_message = edge_message.reshape(batch_size, self.sequence_length, self.num_edges, self.edge_latent_dim)
 
-            node_message = self.node_attention_head(node_message)
-            edge_message = self.edge_attention_head(edge_message)
+                node_message = self.node_attention_head(node_message)
+                edge_message = self.edge_attention_head(edge_message)
 
             node_message = node_message.reshape(-1, self.node_latent_dim)
             edge_message = edge_message.reshape(-1, self.edge_latent_dim)
