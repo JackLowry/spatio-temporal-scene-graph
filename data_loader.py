@@ -603,7 +603,7 @@ class IsaacLabDataset(Dataset):
         }
         return return_data
     
-class IsaacLabSequenceDataset(Dataset):
+class IsaacLabTemporalDataset(Dataset):
  
     def __init__(self, root_dir, scale_factor=1, transform=None):
         """
@@ -778,13 +778,27 @@ class IsaacLabSequenceDataset(Dataset):
             sequence_node_network_mask.append(node_network_mask)
             sequence_edge_network_mask.append(edge_network_mask)
 
+        #stack bboxes and labels together
+        sequence_object_ret_data_stacked = {}
+        for key in sequence_object_ret_data[0].keys():
+            sequence_object_ret_data_stacked[key] = torch.stack(
+                [sequence_object_ret_data[i][key] for i in range(len(sequence_object_ret_data))]
+            )
+
+        sequence_relation_ret_data_stacked = {}
+        for key in sequence_relation_ret_data[0].keys():
+            sequence_relation_ret_data_stacked[key] = torch.stack(
+                [sequence_relation_ret_data[i][key] for i in range(len(sequence_relation_ret_data))]
+            )
+
+
         return_data = {
-            "nodes": sequence_object_ret_data,
-            "edges": sequence_relation_ret_data,
-            "image": sequence_image,
-            "orig_image": sequence_orig_image,
-            "edge_idx_to_node_idxs": sequence_edge_idx_to_node_idxs,
-            "node_network_mask": sequence_node_network_mask,
-            "edge_network_mask": sequence_edge_network_mask
+            "nodes": sequence_object_ret_data_stacked,
+            "edges": sequence_relation_ret_data_stacked,
+            "image": torch.stack(sequence_image),
+            "orig_image": torch.stack(sequence_orig_image),
+            "edge_idx_to_node_idxs": torch.stack(sequence_edge_idx_to_node_idxs),
+            "node_network_mask": torch.stack(sequence_node_network_mask),
+            "edge_network_mask": torch.stack(sequence_edge_network_mask)
         }
         return return_data

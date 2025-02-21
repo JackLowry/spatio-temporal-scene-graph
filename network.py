@@ -33,7 +33,7 @@ class BiLSTM_Encoder(nn.Module):
 
         return y
     
-class  CNN_Encoder(nn.Module):
+class CNN_Encoder(nn.Module):
 
     def __init__(self, input_channels, channels, kernel_sizes, dropout=0, activation_fn=nn.ReLU):
         super(CNN_Encoder, self).__init__()
@@ -109,10 +109,10 @@ class MLP(nn.Module):
                 layers.append(nn.Dropout(dropout))
             layers.append(nn.Linear(last_layer_dim, layer_dim))
 
-            layers.append(ops.Permute([0, 2, 1]))
             if normalization_layer:
+                layers.append(ops.Permute([0, 2, 1]))
                 layers.append(normalization_layer(layer_dim))
-            layers.append(ops.Permute([0, 2, 1]))
+                layers.append(ops.Permute([0, 2, 1]))
 
             layers.append(activation_fn())
             last_layer_dim = layer_dim
@@ -258,8 +258,8 @@ class IterativeMessagePoolingPassingLayer(nn.Module):
         node_hidden = self.node_gru(node_latents)
         edge_hidden = self.edge_gru(edge_latents)
 
-        edge_subject_idxs = edge_idx_to_node_idxs[:, :, 1].to(torch.long)
-        edge_object_idxs = edge_idx_to_node_idxs[:, :, 2].to(torch.long)
+        edge_subject_idxs = edge_idx_to_node_idxs[..., 1].to(torch.long)
+        edge_object_idxs = edge_idx_to_node_idxs[..., 2].to(torch.long)
 
         node_hiddens = [node_hidden.clone()]
         edge_hiddens = [edge_hidden.clone()]
@@ -269,7 +269,7 @@ class IterativeMessagePoolingPassingLayer(nn.Module):
         #mapping of which nodes are connected to which edges
         node_edge_mat = torch.zeros(batch_size, self.num_nodes, self.num_edges).to(node_latents.device)
         batch_idxs = torch.arange(batch_size).repeat_interleave(2*self.num_edges).to(torch.long).to(node_latents.device)
-        node_idxs = edge_idx_to_node_idxs[:, :, 1:].reshape(-1).to(torch.long).to(node_latents.device)
+        node_idxs = edge_idx_to_node_idxs[..., 1:].reshape(-1).to(torch.long).to(node_latents.device)
         edge_idxs = torch.arange(self.num_edges).repeat_interleave(2).tile((batch_size)).to(node_latents.device)
         
         node_edge_mat[batch_idxs, node_idxs, edge_idxs] = 1.0
@@ -394,8 +394,13 @@ class StowTrainSceneGraphModel(nn.Module):
 
             self.generator = SceneGraphGenerator(num_nodes, network_args)
             
-            self.node_label_extractor = MLP(latent_size, [latent_size//2, latent_size//4, num_node_labels], dropout)
-            self.edge_label_extractor = MLP(latent_size, [latent_size//2, latent_size//4, num_edge_labels], dropout)
+            if network_args['use_batch_norm']:
+                batch_norm = nn.BatchNorm1d
+            else:
+                batch_norm = None
+
+            self.node_label_extractor = MLP(latent_size, [latent_size//2, latent_size//4, num_node_labels], dropout, normalization_layer=batch_norm)
+            self.edge_label_extractor = MLP(latent_size, [latent_size//2, latent_size//4, num_edge_labels], dropout, normalization_layer=batch_norm)
 
             self.relative_position_extractor = MLP(latent_size, [latent_size//2, latent_size//4, 3], dropout)
 
@@ -416,37 +421,3 @@ class StowTrainSceneGraphModel(nn.Module):
 
             return (node_labels, edge_labels, relative_position)
 
-class UpdateSceneGraphModel(nn.Module):
-        def __init__(self, num_nodes, num_node_labels, num_edge_labels, num_lstm_layers=1, latent_size=512, dropout=0.5, encoder_model="lstm", feature_extractor="dino"):
-            super(StowTrainSceneGraphModel, self).__init__()
-
-            self.latent_encoder = SceneGraphGenerator(num_nodes, num_lstm_layers, latent_size, dropout, encoder_model, feature_extractor)
-            
-            self.graph_
-
-
-            self.node_label_extractor = MLP(latent_size, [latent_size//2, latent_size//4, num_node_labels], dropout)
-            self.edge_label_extractor = MLP(latent_size, [latent_size//2, latent_size//4, num_edge_labels], dropout)
-
-            self.relative_position_extractor = MLP(latent_size, [latent_size//2, latent_size//4, 3], dropout)
-
-
-        # def reset_model(self):
-
-
-        def forward(self, observations):
-
-            latents = []
-
-            for o in observations:
-                (image, object_bounding_boxes, union_bounding_boxes, node_latents, edge_latents) = o
-                latents.append(self.generator(image, object_bounding_boxes, union_bounding_boxes))
-
-            node_latents, edge_latents = self.generator(image, object_bounding_boxes, union_bounding_boxes)
-
-            node_labels = self.node_label_extractor(node_latents)
-            edge_labels = self.edge_label_extractor(edge_latents)
-
-            relative_position = self.relative_position_extractor(edge_latents)
-
-            return (node_labels, edge_labels, relative_position)
