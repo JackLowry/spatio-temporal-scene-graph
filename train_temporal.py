@@ -73,7 +73,7 @@ def randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, 
         #remove self edges
         edge_idxs = edge_idxs[non_center_edges]
 
-        edge_idxs = edge_idxs - edge_idxs//num_objects
+        edge_idxs = edge_idxs - (1+edge_idxs//(num_objects+1))
 
         batch_union_bbox[batch_idx] = batch_union_bbox[batch_idx, edge_idxs]
         for i in range(len(edge_gt)):
