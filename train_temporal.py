@@ -33,6 +33,8 @@ import os
 def randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, node_gt, edge_gt):
     #todo randomize edges
 
+
+
     num_objects = batch_object_bbox.shape[2]
     batch_size = batch_images.shape[0]
     seq_len = batch_images.shape[1]
@@ -62,7 +64,15 @@ def randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, 
         edge_idxs = edge_idxs[random_node_idxs]
         edge_idxs = [e[random_node_idxs] for e in edge_idxs]
         edge_idxs = torch.concat(edge_idxs)
+
+        non_center_edges = torch.stack(torch.split(non_center_edges, num_objects), dim=0)
+        non_center_edges = non_center_edges[random_node_idxs]
+        non_center_edges = [e[random_node_idxs] for e in non_center_edges]
+        non_center_edges = torch.concat(non_center_edges)
+
+        #remove self edges
         edge_idxs = edge_idxs[non_center_edges]
+
         edge_idxs = edge_idxs - edge_idxs//num_objects
 
         batch_union_bbox[batch_idx] = batch_union_bbox[batch_idx, edge_idxs]
@@ -92,7 +102,7 @@ def ddp_setup(rank: int, world_size: int):
   torch.cuda.set_device(rank)
   init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
-config_name = "networks/resnet-imp.yaml"
+config_name = "networks/temporal/two.yaml"
 
 def multi_gpu_train(rank, world_size, config):
     ddp_setup(rank, world_size)
@@ -190,11 +200,18 @@ def train(device, config):
             batch_edge_network_mask = batch['edge_network_mask'].to(device)
 
             # import pdb; pdb.set_trace
-            (batch_images, batch_object_bbox, batch_union_bbox, node_parameters, edge_parameters) \
+            if config["randomize_input"] and config["randomize_ground_truth"]:
+                (batch_images, batch_object_bbox, batch_union_bbox, node_parameters, edge_parameters) \
                 = randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, 
-                                           [gt_node_label, batch_node_network_mask], [gt_edge_label, gt_pos, batch_edge_network_mask, batch_edge_idx_to_node_idxs])
-            (gt_node_label, batch_node_network_mask) = node_parameters
-            (gt_edge_label, gt_pos, batch_edge_network_mask, batch_edge_idx_to_node_idxs) = edge_parameters
+                                            [gt_node_label, batch_node_network_mask], [gt_edge_label, gt_pos, batch_edge_network_mask, batch_edge_idx_to_node_idxs])
+                (gt_node_label, batch_node_network_mask) = node_parameters
+                (gt_edge_label, gt_pos, batch_edge_network_mask, batch_edge_idx_to_node_idxs) = edge_parameters
+            elif config["randomize_input"]:
+                (batch_images, batch_object_bbox, batch_union_bbox, node_parameters, edge_parameters) \
+                = randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, 
+                                            [batch_node_network_mask], [batch_edge_network_mask, batch_edge_idx_to_node_idxs])
+                batch_node_network_mask = node_parameters[0]
+                (batch_edge_network_mask, batch_edge_idx_to_node_idxs) = edge_parameters
 
             node_labels, edge_labels, relative_position = model(batch_images, 
                                                                 batch_object_bbox, 
@@ -269,6 +286,20 @@ def train(device, config):
             
                             batch_node_network_mask = batch['node_network_mask'].to(device)
                             batch_edge_network_mask = batch['edge_network_mask'].to(device)
+
+                            if config["randomize_input"] and config["randomize_ground_truth"]:
+                                (batch_images, batch_object_bbox, batch_union_bbox, node_parameters, edge_parameters) \
+                                = randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, 
+                                                            [gt_node_label, batch_node_network_mask], [gt_edge_label, gt_pos, batch_edge_network_mask, batch_edge_idx_to_node_idxs])
+                                (gt_node_label, batch_node_network_mask) = node_parameters
+                                (gt_edge_label, gt_pos, batch_edge_network_mask, batch_edge_idx_to_node_idxs) = edge_parameters
+                            elif config["randomize_input"]:
+                                (batch_images, batch_object_bbox, batch_union_bbox, node_parameters, edge_parameters) \
+                                = randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, 
+                                                            [batch_node_network_mask], [batch_edge_network_mask, batch_edge_idx_to_node_idxs])
+                                batch_node_network_mask = node_parameters[0]
+                                (batch_edge_network_mask, batch_edge_idx_to_node_idxs) = edge_parameters
+
                             node_labels, edge_labels, relative_position = model(batch_images, batch_object_bbox, batch_union_bbox, batch_edge_idx_to_node_idxs,
                                                                                 batch_node_network_mask, batch_edge_network_mask)
                             node_labels = node_labels.reshape(-1, node_labels.shape[-1])
