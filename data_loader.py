@@ -758,6 +758,7 @@ class IsaacLabTemporalDataset(Dataset):
             relation_data = [relation_data[i] for i in range(len(relation_data)) if relation_data[i] is not None]
             edge_idx_to_node_idxs = [edge_idx_to_node_idxs[i] for i in range(len(edge_idx_to_node_idxs)) if edge_idx_to_node_idxs[i] is not None]
             edge_idx_to_node_idxs = torch.Tensor(edge_idx_to_node_idxs)
+            edge_idx_to_node_idxs[:, 0] = edge_idx_to_node_idxs[:, 0] - (1+edge_idx_to_node_idxs[:, 0]//(self.num_objects+1))
             edge_network_mask = torch.Tensor(edge_network_mask) == 1
 
             object_ret_data  = {

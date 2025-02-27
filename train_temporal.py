@@ -30,11 +30,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 import os
 
-def randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, node_gt, edge_gt):
+def randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, batch_edge_idx_to_node_idxs,
+                             node_gt, edge_gt):
     #todo randomize edges
-
-
-
     num_objects = batch_object_bbox.shape[2]
     batch_size = batch_images.shape[0]
     seq_len = batch_images.shape[1]
@@ -42,6 +40,7 @@ def randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, 
     batch_images = batch_images.flatten(0, 1)
     batch_object_bbox = batch_object_bbox.flatten(0, 1) 
     batch_union_bbox = batch_union_bbox.flatten(0, 1)
+    batch_edge_idx_to_node_idxs = batch_edge_idx_to_node_idxs.flatten(0, 1)
 
     for i in range(len(node_gt)):
         node_gt[i] = node_gt[i].flatten(0, 1)
@@ -50,30 +49,35 @@ def randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, 
         edge_gt[i] = edge_gt[i].flatten(0, 1)
 
     for batch_idx in range(batch_size*seq_len):
-        random_node_idxs = torch.randperm(num_objects)
+        random_node_idxs = torch.randperm(num_objects).to(batch_images.device)
         batch_object_bbox[batch_idx] = batch_object_bbox[batch_idx, random_node_idxs]
         for i in range(len(node_gt)):
             node_gt[i][batch_idx] = node_gt[i][batch_idx, random_node_idxs]
 
         num_edges = num_objects*num_objects
-        edge_idxs = torch.arange(num_edges)
+        edge_idxs = torch.arange(num_edges).to(batch_images.device)
 
-        non_center_edges = edge_idxs % (num_objects+1) != 0
+        non_self_edges = edge_idxs % (num_objects+1) != 0
 
         edge_idxs = torch.stack(torch.split(edge_idxs, num_objects), dim=0)
         edge_idxs = edge_idxs[random_node_idxs]
         edge_idxs = [e[random_node_idxs] for e in edge_idxs]
         edge_idxs = torch.concat(edge_idxs)
 
-        non_center_edges = torch.stack(torch.split(non_center_edges, num_objects), dim=0)
-        non_center_edges = non_center_edges[random_node_idxs]
-        non_center_edges = [e[random_node_idxs] for e in non_center_edges]
-        non_center_edges = torch.concat(non_center_edges)
+        non_self_edges = torch.stack(torch.split(non_self_edges, num_objects), dim=0)
+        non_self_edges = non_self_edges[random_node_idxs]
+        non_self_edges = [e[random_node_idxs] for e in non_self_edges]
+        non_self_edges = torch.concat(non_self_edges)
 
         #remove self edges
-        edge_idxs = edge_idxs[non_center_edges]
+        edge_idxs = edge_idxs[non_self_edges]
 
         edge_idxs = edge_idxs - (1+edge_idxs//(num_objects+1))
+
+        batch_edge_idx_to_node_idxs[batch_idx] = batch_edge_idx_to_node_idxs[batch_idx][edge_idxs]
+        batch_edge_idx_to_node_idxs[batch_idx][:, 1] = random_node_idxs[batch_edge_idx_to_node_idxs[batch_idx][:, 1].to(torch.long)]
+        batch_edge_idx_to_node_idxs[batch_idx][:, 2] = random_node_idxs[batch_edge_idx_to_node_idxs[batch_idx][:, 2].to(torch.long)]
+
 
         batch_union_bbox[batch_idx] = batch_union_bbox[batch_idx, edge_idxs]
         for i in range(len(edge_gt)):
@@ -82,6 +86,7 @@ def randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, 
     batch_images = batch_images.reshape(batch_size, seq_len, *batch_images.shape[1:])
     batch_object_bbox = batch_object_bbox.reshape(batch_size, seq_len, *batch_object_bbox.shape[1:])
     batch_union_bbox = batch_union_bbox.reshape(batch_size, seq_len, *batch_union_bbox.shape[1:])
+    batch_edge_idx_to_node_idxs = batch_edge_idx_to_node_idxs.reshape(batch_size, seq_len, *batch_edge_idx_to_node_idxs.shape[1:])
 
     for i in range(len(node_gt)):
         node_gt[i] = node_gt[i].reshape(batch_size, seq_len, *node_gt[i].shape[1:])
@@ -89,7 +94,7 @@ def randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, 
     for i in range(len(edge_gt)):
         edge_gt[i] = edge_gt[i].reshape(batch_size, seq_len, *edge_gt[i].shape[1:])
 
-    return batch_images, batch_object_bbox, batch_union_bbox, node_gt, edge_gt
+    return batch_images, batch_object_bbox, batch_union_bbox, batch_edge_idx_to_node_idxs, node_gt, edge_gt
 
 def ddp_setup(rank: int, world_size: int):
   """
@@ -201,17 +206,17 @@ def train(device, config):
 
             # import pdb; pdb.set_trace
             if config["randomize_input"] and config["randomize_ground_truth"]:
-                (batch_images, batch_object_bbox, batch_union_bbox, node_parameters, edge_parameters) \
-                = randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, 
-                                            [gt_node_label, batch_node_network_mask], [gt_edge_label, gt_pos, batch_edge_network_mask, batch_edge_idx_to_node_idxs])
+                (batch_images, batch_object_bbox, batch_union_bbox, batch_edge_idx_to_node_idxs, node_parameters, edge_parameters)   \
+                    = randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, batch_edge_idx_to_node_idxs,
+                                            [gt_node_label, batch_node_network_mask], [gt_edge_label, gt_pos, batch_edge_network_mask])
                 (gt_node_label, batch_node_network_mask) = node_parameters
-                (gt_edge_label, gt_pos, batch_edge_network_mask, batch_edge_idx_to_node_idxs) = edge_parameters
+                (gt_edge_label, gt_pos, batch_edge_network_mask) = edge_parameters
             elif config["randomize_input"]:
-                (batch_images, batch_object_bbox, batch_union_bbox, node_parameters, edge_parameters) \
-                = randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, 
-                                            [batch_node_network_mask], [batch_edge_network_mask, batch_edge_idx_to_node_idxs])
+                (batch_images, batch_object_bbox, batch_union_bbox, batch_edge_idx_to_node_idxs, node_parameters, edge_parameters) \
+                = randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, batch_edge_idx_to_node_idxs,
+                                            [batch_node_network_mask], [batch_edge_network_mask])
                 batch_node_network_mask = node_parameters[0]
-                (batch_edge_network_mask, batch_edge_idx_to_node_idxs) = edge_parameters
+                batch_edge_network_mask = edge_parameters[0]
 
             node_labels, edge_labels, relative_position = model(batch_images, 
                                                                 batch_object_bbox, 
@@ -288,17 +293,17 @@ def train(device, config):
                             batch_edge_network_mask = batch['edge_network_mask'].to(device)
 
                             if config["randomize_input"] and config["randomize_ground_truth"]:
-                                (batch_images, batch_object_bbox, batch_union_bbox, node_parameters, edge_parameters) \
-                                = randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, 
-                                                            [gt_node_label, batch_node_network_mask], [gt_edge_label, gt_pos, batch_edge_network_mask, batch_edge_idx_to_node_idxs])
+                                (batch_images, batch_object_bbox, batch_union_bbox, batch_edge_idx_to_node_idxs, node_parameters, edge_parameters) \
+                                = randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, batch_edge_idx_to_node_idxs,
+                                                            [gt_node_label, batch_node_network_mask], [gt_edge_label, gt_pos, batch_edge_network_mask])
                                 (gt_node_label, batch_node_network_mask) = node_parameters
-                                (gt_edge_label, gt_pos, batch_edge_network_mask, batch_edge_idx_to_node_idxs) = edge_parameters
+                                (gt_edge_label, gt_pos, batch_edge_network_mask) = edge_parameters
                             elif config["randomize_input"]:
-                                (batch_images, batch_object_bbox, batch_union_bbox, node_parameters, edge_parameters) \
-                                = randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, 
-                                                            [batch_node_network_mask], [batch_edge_network_mask, batch_edge_idx_to_node_idxs])
+                                (batch_images, batch_object_bbox, batch_union_bbox, batch_edge_idx_to_node_idxs, node_parameters, edge_parameters) \
+                                = randomize_graph_ordering(batch_images, batch_object_bbox, batch_union_bbox, batch_edge_idx_to_node_idxs,
+                                                            [batch_node_network_mask], [batch_edge_network_mask])
                                 batch_node_network_mask = node_parameters[0]
-                                (batch_edge_network_mask, batch_edge_idx_to_node_idxs) = edge_parameters
+                                batch_edge_network_mask = edge_parameters[0]
 
                             node_labels, edge_labels, relative_position = model(batch_images, batch_object_bbox, batch_union_bbox, batch_edge_idx_to_node_idxs,
                                                                                 batch_node_network_mask, batch_edge_network_mask)
