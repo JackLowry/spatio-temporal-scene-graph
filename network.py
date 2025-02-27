@@ -270,7 +270,7 @@ class IterativeMessagePoolingPassingLayer(nn.Module):
         node_edge_mat = torch.zeros(batch_size, self.num_nodes, self.num_edges).to(node_latents.device)
         batch_idxs = torch.arange(batch_size).repeat_interleave(2*self.num_edges).to(torch.long).to(node_latents.device)
         node_idxs = edge_idx_to_node_idxs[..., 1:].reshape(-1).to(torch.long).to(node_latents.device)
-        edge_idxs = torch.arange(self.num_edges).repeat_interleave(2).tile((batch_size)).to(node_latents.device)
+        edge_idxs = edge_idx_to_node_idxs[..., 0].repeat_interleave(2).to(torch.long).to(node_latents.device)
         
         node_edge_mat[batch_idxs, node_idxs, edge_idxs] = 1.0
 
