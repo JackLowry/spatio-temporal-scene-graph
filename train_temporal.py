@@ -379,6 +379,7 @@ def train(device, config):
                 node_labels_viz = node_labels_viz[0, -1]
                 node_labels_viz = torch.argmax(nn.functional.softmax(node_labels_viz, dim=-1), dim=-1)
                 img_language_labels = [dataset.metadata["object_id_to_name"][idx.cpu().item()] for idx in node_labels_viz]
+                edge_language_labels = dataset.metadata
                 img = draw_image(batch["orig_image"][0][-1], batch_object_bbox.cpu()[0][-1]*(1/scale_factor), img_language_labels)
                 img.save("test.png")
                 img = wandb.Image(img)

@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+from matplotlib import colormaps
 import torch
 import torchvision.transforms as transforms
 from torchvision.transforms.functional import resized_crop, to_pil_image
@@ -180,6 +181,7 @@ def visualize_boxes_pretrain(image, object_bounding_boxes, edge_bounding_boxes, 
     plt.savefig("edges.png")
 
 
+
 def draw_single_box(pic, box, color='red', draw_info=None):
     draw = ImageDraw.Draw(pic)
     x1,y1,x2,y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
@@ -189,18 +191,43 @@ def draw_single_box(pic, box, color='red', draw_info=None):
         info = draw_info
         draw.text((x1, y1), info)
 
-def draw_image(img, boxes, pred_labels):
+def draw_image(img, boxes, pred_labels, cmap=colormaps['tab10'].colors):
     pic = to_pil_image(img)
     num_obj = boxes.shape[0]
+    colormaps['tab10'].colors
     for i in range(num_obj):
+        color = cmap[i]
         info = pred_labels[i]
 
         box = boxes[i]
         # box = [box[0]*img.shape[1], box[1]*img.shape[2], 
         #        box[2]*img.shape[1], box[3]*img.shape[2]]
 
-        draw_single_box(pic, box, draw_info=info)
+        draw_single_box(pic, box, color=color, draw_info=info)
     return pic
+
+def draw_edges(pred_edge_vals, ax, cmap):
+    edges_img = np.zeros((11, 11, 3))
+    edges_img[1:, 0] = cmap
+    edges_img[0, 1:] = cmap
+    ax.imshow(edges_img)
+
+
+
+    edge_idx = 0
+
+    text_x, text_y = np.meshgrid(np.arange(1,11), np.arange(1,11))
+    for xval, yval in zip(text_x.flatten(), text_y.flatten()):
+        if xval == yval:
+            continue
+
+        ax.text(xval, yval, pred_edge_vals[edge_idx], va='center', ha='center')
+
+        edge_idx += 1
+def draw_graph(img, boxes, pred_obj_labels, pred_edge_labels):
+    cmap = colormaps['tab10'].colors
+
+    pred_image = 
 
             
     
