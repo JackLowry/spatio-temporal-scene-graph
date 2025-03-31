@@ -191,13 +191,13 @@ def draw_single_box(pic, box, color='red', draw_info=None):
         info = draw_info
         draw.text((x1, y1), info)
 
-def draw_image(img, boxes, pred_labels, cmap=colormaps['tab10'].colors):
+def draw_image(img, boxes, labels, cmap=colormaps['tab10'].colors):
     pic = to_pil_image(img)
     num_obj = boxes.shape[0]
-    colormaps['tab10'].colors
     for i in range(num_obj):
         color = cmap[i]
-        info = pred_labels[i]
+        color = tuple([int(c*255) for c in color])
+        info = labels[i]
 
         box = boxes[i]
         # box = [box[0]*img.shape[1], box[1]*img.shape[2], 
@@ -206,28 +206,37 @@ def draw_image(img, boxes, pred_labels, cmap=colormaps['tab10'].colors):
         draw_single_box(pic, box, color=color, draw_info=info)
     return pic
 
-def draw_edges(pred_edge_vals, ax, cmap):
-    edges_img = np.zeros((11, 11, 3))
-    edges_img[1:, 0] = cmap
-    edges_img[0, 1:] = cmap
+def draw_edges(edge_labels, ax, cmap, num_objects):
+    edges_img = np.full((num_objects+1, num_objects+1, 3), 1.0)
+    edges_img[1:, 0] = cmap[:num_objects]
+    edges_img[0, 1:] = cmap[:num_objects]
     ax.imshow(edges_img)
 
 
 
     edge_idx = 0
 
-    text_x, text_y = np.meshgrid(np.arange(1,11), np.arange(1,11))
+    text_x, text_y = np.meshgrid(np.arange(1,num_objects+1), np.arange(1,num_objects+1))
     for xval, yval in zip(text_x.flatten(), text_y.flatten()):
         if xval == yval:
             continue
 
-        ax.text(xval, yval, pred_edge_vals[edge_idx], va='center', ha='center')
+        ax.text(xval, yval, edge_labels[edge_idx], va='center', ha='center')
 
         edge_idx += 1
-def draw_graph(img, boxes, pred_obj_labels, pred_edge_labels):
-    cmap = colormaps['tab10'].colors
 
-    pred_image = 
+def draw_graph(img, boxes, obj_labels, edge_labels):
+    cmap = colormaps['tab10'].colors
+    num_objects = boxes.shape[0]
+
+    fig, ax = plt.subplots(1,2, figsize=(20, 12))
+
+    drawn_img = draw_image(img, boxes, obj_labels, cmap=cmap)
+    ax[0].imshow(drawn_img)
+
+    draw_edges(edge_labels, ax[1], cmap, num_objects)
+
+    return fig
 
             
     

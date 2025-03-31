@@ -253,6 +253,7 @@ class TemporalIterativeMessagePoolingPassingLayer(nn.Module):
 
             edge_message = edge_message_subject + edge_message_object
 
+
             if self.use_multi_frame_attn:
                 node_message = node_message.reshape(batch_size, self.sequence_length, self.num_nodes, self.node_latent_dim)
                 edge_message = edge_message.reshape(batch_size, self.sequence_length, self.num_edges, self.edge_latent_dim)

@@ -8,7 +8,7 @@ import PIL
 from network import StowTrainSceneGraphModel
 from network_temporal import TemporalSceneGraphModel
 from data_loader import IsaacLabDataset, IsaacLabTemporalDataset, StowDataset
-from visualization import visualize_boxes, draw_image
+from visualization import visualize_boxes, draw_image, draw_graph
 import sys
 
 import numpy as np
@@ -192,17 +192,17 @@ def train(device, config):
         # for batch in train_dataloader:
             optimizer.zero_grad()
 
-            batch_rgb = batch["image"].to(device).to(torch.float)
+            batch_rgb = batch["image"].to(device).to(torch.float).clone()
             batch_images = batch_rgb
-            batch_object_bbox = batch["nodes"]["bbox"].to(device)
-            batch_union_bbox = batch["edges"]["bbox"].to(device)
-            batch_edge_idx_to_node_idxs = batch["edge_idx_to_node_idxs"].to(device)
-            gt_node_label = batch["nodes"]["object_label"].to(device)
-            gt_edge_label = batch["edges"]["relationship_label"].to(device)
-            gt_pos = batch["edges"]["dist"].to(device)
+            batch_object_bbox = batch["nodes"]["bbox"].to(device).clone()
+            batch_union_bbox = batch["edges"]["bbox"].to(device).clone()
+            batch_edge_idx_to_node_idxs = batch["edge_idx_to_node_idxs"].to(device).clone()
+            gt_node_label = batch["nodes"]["object_label"].to(device).clone()
+            gt_edge_label = batch["edges"]["relationship_label"].to(device).clone()
+            gt_pos = batch["edges"]["dist"].to(device).clone()
             
-            batch_node_network_mask = batch['node_network_mask'].to(device)
-            batch_edge_network_mask = batch['edge_network_mask'].to(device)
+            batch_node_network_mask = batch['node_network_mask'].to(device).clone()
+            batch_edge_network_mask = batch['edge_network_mask'].to(device).clone()
 
             # import pdb; pdb.set_trace
             if config["randomize_input"] and config["randomize_ground_truth"]:
@@ -280,17 +280,17 @@ def train(device, config):
                         
                         for test_batch in (pbar := tqdm(test_dataloader, leave=False)):
 
-                            batch_rgb = batch["image"].to(device).to(torch.float)
+                            batch_rgb = batch["image"].to(device).to(torch.float).clone()
                             batch_images = batch_rgb
-                            batch_object_bbox = batch["nodes"]["bbox"].to(device)
-                            batch_union_bbox = batch["edges"]["bbox"].to(device)
-                            batch_edge_idx_to_node_idxs = batch["edge_idx_to_node_idxs"].to(device)
-                            gt_node_label = batch["nodes"]["object_label"].to(device)
-                            gt_edge_label = batch["edges"]["relationship_label"].to(device)
-                            gt_pos = batch["edges"]["dist"].to(device)
+                            batch_object_bbox = batch["nodes"]["bbox"].to(device).clone()
+                            batch_union_bbox = batch["edges"]["bbox"].to(device).clone()
+                            batch_edge_idx_to_node_idxs = batch["edge_idx_to_node_idxs"].to(device).clone()
+                            gt_node_label = batch["nodes"]["object_label"].to(device).clone()
+                            gt_edge_label = batch["edges"]["relationship_label"].to(device).clone()
+                            gt_pos = batch["edges"]["dist"].to(device).clone()
             
-                            batch_node_network_mask = batch['node_network_mask'].to(device)
-                            batch_edge_network_mask = batch['edge_network_mask'].to(device)
+                            batch_node_network_mask = batch['node_network_mask'].to(device).clone()
+                            batch_edge_network_mask = batch['edge_network_mask'].to(device).clone()
 
                             if config["randomize_input"] and config["randomize_ground_truth"]:
                                 (batch_images, batch_object_bbox, batch_union_bbox, batch_edge_idx_to_node_idxs, node_parameters, edge_parameters) \
@@ -375,14 +375,37 @@ def train(device, config):
                 # node_viz_image = wandb.Image("nodes.png")
                 # edge_viz_image = wandb.Image("edges.png")
 
-                node_labels_viz = node_labels.reshape(node_labels.shape[0]//(dataset.num_objects**2), dataset.num_object_labels, dataset.num_objects, -1)
-                node_labels_viz = node_labels_viz[0, -1]
+
+                seq_id_to_viz = 3
+
+                node_labels_viz = node_labels.reshape(batch_size, dataset.num_objects, -1, node_labels.shape[-1])
+                node_labels_viz = node_labels_viz[0, seq_id_to_viz]
                 node_labels_viz = torch.argmax(nn.functional.softmax(node_labels_viz, dim=-1), dim=-1)
                 img_language_labels = [dataset.metadata["object_id_to_name"][idx.cpu().item()] for idx in node_labels_viz]
-                edge_language_labels = dataset.metadata
-                img = draw_image(batch["orig_image"][0][-1], batch_object_bbox.cpu()[0][-1]*(1/scale_factor), img_language_labels)
-                img.save("test.png")
-                img = wandb.Image(img)
+                
+                edge_labels_viz = edge_labels.reshape(batch_size, dataset.num_objects, -1, edge_labels.shape[-1])
+                edge_labels_viz = edge_labels_viz[0, seq_id_to_viz]
+                edge_labels_viz = torch.argmax(nn.functional.softmax(edge_labels_viz, dim=-1), dim=-1)
+                edge_language_labels = [dataset.metadata["edge_id_to_name"][idx.cpu().item()] for idx in edge_labels_viz]
+
+                pred_img = draw_graph(batch["orig_image"][0][seq_id_to_viz], 
+                                 batch_object_bbox.cpu()[0][seq_id_to_viz]*(1/scale_factor), 
+                                 img_language_labels,
+                                 edge_language_labels)
+                
+                node_labels_viz = gt_node_label.reshape(batch_size, dataset.num_objects, -1)
+                node_labels_viz = node_labels_viz[0, seq_id_to_viz]
+                edge_labels_viz = gt_edge_label.reshape(batch_size, dataset.num_objects, -1)
+                edge_labels_viz = edge_labels_viz[0, seq_id_to_viz]
+                img_language_labels = [dataset.metadata["object_id_to_name"][idx.cpu().item()] for idx in node_labels_viz]
+                edge_language_labels = [dataset.metadata["edge_id_to_name"][idx.cpu().item()] for idx in edge_labels_viz]
+                gt_img = draw_graph(batch["orig_image"][0][seq_id_to_viz], 
+                                 batch_object_bbox.cpu()[0][seq_id_to_viz]*(1/scale_factor), 
+                                 img_language_labels,
+                                 edge_language_labels)
+                
+                # img.save("test.png")
+                # img = wandb.Image(img)
                 if (not multi_gpu or device == 0) and step % eval_interval != 0:
                     wandb.log({"train/loss": avg_loss, "train/node_loss": avg_node_loss, "train/edge_loss": avg_edge_loss, "train/pos_loss": pos_loss, "img": img})
                 else:
@@ -390,7 +413,9 @@ def train(device, config):
                                "test/node_recall@5": node_recall_at_5,
                             "train/loss": avg_loss, "train/node_loss": avg_node_loss, "train/edge_loss": avg_edge_loss, "train/pos_loss": pos_loss, 
                             "test/loss": avg_test_loss, "test/node_loss": avg_test_node_loss, "test/edge_loss": avg_test_edge_loss, 
-                            "test/pos_loss": avg_test_pos_loss, "img": img})
+                            "test/pos_loss": avg_test_pos_loss, 
+                            "pred_img": pred_img,
+                            "gt_img": gt_img})
                     
             if (multi_gpu and device == 0) and step % save_interval == 0:
                 timestr = time.strftime("%Y_%m_%d-%H_%M_%S")

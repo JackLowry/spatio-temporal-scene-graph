@@ -624,6 +624,21 @@ class IsaacLabTemporalDataset(Dataset):
         self.metadata["object_id_to_name"] = {
             v['id']:k for k,v in self.metadata["node_data"].items()
         }
+
+        self.metadata['edge_name_to_id'] = {
+            "no_relation": 0,
+            "in_front_of": 1,
+            "behind": 2,
+            "on_top_of": 3,
+            "below": 4,
+            "right_of": 5,
+            "left_of": 6,
+        }
+        self.metadata["edge_id_to_name"] = {
+            v:k for k,v in self.metadata["edge_name_to_id"].items()
+        }
+
+        self.metadata["edge_id_to_name"]
         
         self.no_object_label = 0
         self.no_relationship_label = 0
@@ -733,17 +748,19 @@ class IsaacLabTemporalDataset(Dataset):
                 subject = relation_tuple[0]
                 object = relation_tuple[1]
 
-                relation_data_idx = object_to_training_idxs[subject]*self.num_objects + object_to_idx[object]
-                edge_idx_to_node_idxs[relation_data_idx] = [relation_data_idx, object_to_idx[subject_id], object_to_idx[object_id]]
-                if node_network_mask[object_to_idx[subject_id]] == 0 or node_network_mask[object_to_idx[object_id]] == 0:
-                    edge_network_mask[relation_data_idx] = False
-                else:
-                    edge_network_mask[relation_data_idx] = True
-
                 bbox = graph["edges"][relation_tuple]["bbox"]
                 bbox = torch.Tensor(bbox).unsqueeze(0).cuda()
                 bbox = bbox*self.scale_factor
                 bbox = torch.round(bbox)
+
+                relation_data_idx = object_to_training_idxs[subject]*self.num_objects + object_to_idx[object]
+                edge_idx_to_node_idxs[relation_data_idx] = [relation_data_idx, object_to_idx[subject_id], object_to_idx[object_id]]
+                if node_network_mask[object_to_idx[subject_id]] == 0 or node_network_mask[object_to_idx[object_id]] == 0:
+                    edge_network_mask[relation_data_idx] = False
+                    bbox[:] = 0
+                else:
+                    edge_network_mask[relation_data_idx] = True
+
 
                 dist = graph["edges"][relation_tuple]["xyz_offset"]
                 dist = torch.Tensor(dist).squeeze().unsqueeze(0).cuda()
