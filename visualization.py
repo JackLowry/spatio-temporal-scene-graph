@@ -220,8 +220,11 @@ def draw_edges(edge_labels, ax, cmap, num_objects):
     for xval, yval in zip(text_x.flatten(), text_y.flatten()):
         if xval == yval:
             continue
-
-        ax.text(xval, yval, edge_labels[edge_idx], va='center', ha='center')
+        
+        text = edge_labels[edge_idx]
+        if text == "no_relation":
+            continue
+        ax.text(xval, yval, text, va='center', ha='center')
 
         edge_idx += 1
 

@@ -406,17 +406,19 @@ def train(device, config):
                 
                 # img.save("test.png")
                 # img = wandb.Image(img)
-                if (not multi_gpu or device == 0) and step % eval_interval != 0:
-                    wandb.log({"train/loss": avg_loss, "train/node_loss": avg_node_loss, "train/edge_loss": avg_edge_loss, "train/pos_loss": pos_loss, "img": img})
-                else:
-                    wandb.log({"test/node_f1_score": node_f1, "test/edge_f1_score": edge_f1,
-                               "test/node_recall@5": node_recall_at_5,
-                            "train/loss": avg_loss, "train/node_loss": avg_node_loss, "train/edge_loss": avg_edge_loss, "train/pos_loss": pos_loss, 
-                            "test/loss": avg_test_loss, "test/node_loss": avg_test_node_loss, "test/edge_loss": avg_test_edge_loss, 
-                            "test/pos_loss": avg_test_pos_loss, 
-                            "pred_img": pred_img,
-                            "gt_img": gt_img})
-                    
+                # if (not multi_gpu or device == 0) and step % eval_interval != 0:
+                #     wandb.log({"train/loss": avg_loss, "train/node_loss": avg_node_loss, "train/edge_loss": avg_edge_loss, "train/pos_loss": pos_loss,
+                #                "pred_img": pred_img,
+                #                "gt_img": gt_img})
+                # else:
+                wandb.log({"test/node_f1_score": node_f1, "test/edge_f1_score": edge_f1,
+                            "test/node_recall@5": node_recall_at_5,
+                        "train/loss": avg_loss, "train/node_loss": avg_node_loss, "train/edge_loss": avg_edge_loss, "train/pos_loss": pos_loss, 
+                        "test/loss": avg_test_loss, "test/node_loss": avg_test_node_loss, "test/edge_loss": avg_test_edge_loss, 
+                        "test/pos_loss": avg_test_pos_loss, 
+                        "pred_img": pred_img,
+                        "gt_img": gt_img})
+                
             if (multi_gpu and device == 0) and step % save_interval == 0:
                 timestr = time.strftime("%Y_%m_%d-%H_%M_%S")
                 torch.save(model.module.state_dict(), f"{run_name}/ckpts/loss_{avg_loss}_{timestr}.pt")
