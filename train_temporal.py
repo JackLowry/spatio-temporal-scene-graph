@@ -407,7 +407,9 @@ def train(device, config):
                 # img.save("test.png")
                 # img = wandb.Image(img)
                 if (not multi_gpu or device == 0) and step % eval_interval != 0:
-                    wandb.log({"train/loss": avg_loss, "train/node_loss": avg_node_loss, "train/edge_loss": avg_edge_loss, "train/pos_loss": pos_loss, "img": img})
+                    wandb.log({"train/loss": avg_loss, "train/node_loss": avg_node_loss, "train/edge_loss": avg_edge_loss, "train/pos_loss": pos_loss,
+                               "pred_img": pred_img,
+                               "gt_img": gt_img})
                 else:
                     wandb.log({"test/node_f1_score": node_f1, "test/edge_f1_score": edge_f1,
                                "test/node_recall@5": node_recall_at_5,
