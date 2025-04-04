@@ -680,7 +680,8 @@ class IsaacLabTemporalDataset(Dataset):
             image = image.to(torch.float32)
             # resize
             if self.scale_factor != 1:
-                desired_size = (round(image.shape[-2]*self.scale_factor), round(image.shape[-1]*self.scale_factor))
+                self.desired_size = (round(image.shape[-2]*self.scale_factor), round(image.shape[-1]*self.scale_factor))
+                desired_size = self.desired_size
                 image = torchvision.transforms.functional.resize(image, desired_size)
             
             #apply transformations, don't understand why [0] is required

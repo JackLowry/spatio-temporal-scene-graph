@@ -1,0 +1,1 @@
+python pretrain_detr.py --data_path dataset/isaac_temporal --output_path /home/jack/research/scene_graph/spatio_temporal_sg/outputs --backbone_dirpath $BACKBONE_DIRPATH --memo $MEMO

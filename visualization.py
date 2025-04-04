@@ -232,12 +232,15 @@ def draw_graph(img, boxes, obj_labels, edge_labels):
     cmap = colormaps['tab10'].colors
     num_objects = boxes.shape[0]
 
+    plt.close()
+
     fig, ax = plt.subplots(1,2, figsize=(20, 12))
 
     drawn_img = draw_image(img, boxes, obj_labels, cmap=cmap)
     ax[0].imshow(drawn_img)
 
-    draw_edges(edge_labels, ax[1], cmap, num_objects)
+    if edge_labels is not None:
+        draw_edges(edge_labels, ax[1], cmap, num_objects)
 
     return fig
 

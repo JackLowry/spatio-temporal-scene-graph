@@ -81,6 +81,8 @@ class RGBFeatureExtractor(nn.Module):
 
             # self.fpn = 
 
+
+
     def hook(self, module, input, output):
         self.outputs.append(output)        
     
@@ -93,6 +95,7 @@ class RGBFeatureExtractor(nn.Module):
     def resnet_fpn_forward(self, x):
         self.outputs = []
         self.extractor(x)
+
         return self.outputs
 
 class MLP(nn.Module):

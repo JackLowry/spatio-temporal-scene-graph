@@ -8,6 +8,8 @@ import torchvision
 from network import MLP, BiLSTM_Encoder, CNN_Encoder, IterativeMessagePoolingPassingLayer, RGBFeatureExtractor, SceneGraphGenerator
 from positional_encodings.torch_encodings import PositionalEncoding2D, Summer
 
+from scipy.optimize import linear_sum_assignment
+
 class TemporalSceneGraphModel(nn.Module):
         #num_lstm_layers=1, latent_size=512, dropout=0.5, encoder_model="lstm", feature_extractor="dino"
         def __init__(self, batch_size, num_nodes, num_node_labels, num_edge_labels, sequence_length, network_args):
@@ -15,7 +17,6 @@ class TemporalSceneGraphModel(nn.Module):
 
             dropout = network_args['dropout']
             latent_size = network_args['latent_size']
-
             self.generator = TemporalSceneGraphGenerator(num_nodes, sequence_length, network_args)
             
             if network_args['use_batch_norm']:
@@ -27,6 +28,13 @@ class TemporalSceneGraphModel(nn.Module):
             self.edge_label_extractor = MLP(latent_size, [latent_size//2, latent_size//4, num_edge_labels], dropout, normalization_layer=batch_norm)
 
             self.relative_position_extractor = MLP(latent_size, [latent_size//2, latent_size//4, 3], dropout)
+
+            self.node_box_head = DeformableDetrMLPPredictionHead(
+                input_dim=latent_size,
+                hidden_dim=latent_size,
+                output_dim=4,
+                num_layers=3
+            )
 
 
         # def reset_model(self):
@@ -43,15 +51,18 @@ class TemporalSceneGraphModel(nn.Module):
             node_latents, edge_latents = self.generator(image, object_bounding_boxes, union_bounding_boxes, edge_idx_to_node_idxs,
                                                         node_network_mask, edge_network_mask)
 
-            node_labels = self.node_label_extractor(node_latents)
-            edge_labels = self.edge_label_extractor(edge_latents)
-            relative_position = self.relative_position_extractor(edge_latents)
+            node_latents = node_latents.reshape(batch_size, seq_len, num_objects, -1)
 
-            node_labels = node_labels.reshape(batch_size, seq_len, num_objects, -1)
-            edge_labels = edge_labels.reshape(batch_size, seq_len, num_edges, -1)
-            relative_position = relative_position.reshape(batch_size, seq_len, num_edges, -1)
+            node_boxes = self.node_box_head(node_latents)
+            
+            # node_labels = self.node_label_extractor(node_latents)
+            # edge_labels = self.edge_label_extractor(edge_latents)
+            # relative_position = self.relative_position_extractor(edge_latents)
 
-            return (node_labels, edge_labels, relative_position)
+            # edge_labels = edge_labels.reshape(batch_size, seq_len, num_edges, -1)
+            # relative_position = relative_position.reshape(batch_size, seq_len, num_edges, -1)
+
+            return node_latents, node_boxes
 
 class TemporalSceneGraphGenerator(nn.Module):
 
@@ -88,6 +99,7 @@ class TemporalSceneGraphGenerator(nn.Module):
             self.encoder = TemporalIterativeMessagePoolingPassingLayer(num_nodes, self.embedding_dim, self.latent_size, self.latent_size, network_args['iterations'],
                                                                        sequence_length, network_args["multi_frame_attn"])
         
+        self.matcher = SequenceObjectMatcher(network_args["matching_threshold"], self.latent_size)
         # self.node_latent_downscaler = ops.MLP(128, [256, 64], dropout=0.2)
 
 
@@ -96,6 +108,10 @@ class TemporalSceneGraphGenerator(nn.Module):
                 node_network_mask, edge_network_mask):
 
         # flatten sequence dim in to batch for bbox processing
+        batch_size = image.shape[0]
+        seq_len = image.shape[1]
+        num_objects = object_bounding_boxes.shape[2]
+        num_edges = union_bounding_boxes.shape[2]
         image = image.flatten(0, 1)
         object_bounding_boxes = object_bounding_boxes.flatten(0, 1)
         union_bounding_boxes = union_bounding_boxes.flatten(0, 1)
@@ -104,7 +120,7 @@ class TemporalSceneGraphGenerator(nn.Module):
         edge_network_mask = edge_network_mask.flatten(0, 1)
 
         image_features = self.extractor(image)
-
+        
         # is_all_zeros = torch.all(object_bounding_boxes.flatten(0, 1) == 0, dim=1)
 
         object_bounding_boxes = torch.split(object_bounding_boxes, 1)
@@ -142,6 +158,12 @@ class TemporalSceneGraphGenerator(nn.Module):
         if self.encoder_model == 'iterative-message-passing':
             node_latents, edge_latents = self.encoder(object_features, edge_features, edge_idx_to_node_idxs,
                                                       node_network_mask, edge_network_mask)
+
+
+            self.matcher(node_latents.reshape(batch_size, seq_len, num_objects, -1), 
+                        edge_latents.reshape(batch_size, seq_len, num_edges, -1),
+                        node_network_mask.reshape(batch_size, seq_len, num_objects),
+                        edge_idx_to_node_idxs.reshape(batch_size, seq_len, num_edges, -1))
         # else:
         #     if self.encoder_model == 'lstm':
         #         object_features = object_features.reshape((batch_size, num_objects, -1))
@@ -156,7 +178,7 @@ class TemporalSceneGraphGenerator(nn.Module):
         #     if self.encoder_model == "cnn":
         #         node_latents = node_latents.reshape((batch_size, num_objects, -1))
         #         edge_latents = edge_latents.reshape(batch_size, num_edges, -1)
-
+        
         return node_latents, edge_latents
     
 
@@ -301,5 +323,119 @@ class MultiFrameAttention(nn.Module):
                                                                 attn_mask=self.attn_mask)
 
         return attn_output
+    
+# a module that performs object tracking between frames, and updates the graph according to their similarity.
+# also reorders 
+class SequenceObjectMatcher(nn.Module):
+    def __init__(self, matching_threshold, embedding_dim):
+        super(SequenceObjectMatcher, self).__init__()
+
+        self.matching_threshold = matching_threshold
+        self.occluded_node_embedding = nn.Embedding(1, embedding_dim)
+        self.occluded_edge_embedding = nn.Embedding(1, embedding_dim)
+        self.empty_node_embedding = nn.Embedding(1, embedding_dim)
+        self.empty_edge_embedding = nn.Embedding(1, embedding_dim)
+
+    #unbatched
+    def match_graph(self, prior_objects, full_nodes):
+
+        if len(prior_objects) == 0:
+            indices = []
+            for idx, obj in enumerate(full_nodes):
+                prior_objects.append([obj])
+                indices.append(idx)
+            return prior_objects, indices, indices
+        
+        # add a number of matches equal to the number of objects in the current frame, such that if there are no similar objects to match to, it can serve as
+        # a signal to add the object as a new object
+        similarity_matrix = torch.full((len(prior_objects) + full_nodes.shape[0], full_nodes.shape[0]), self.matching_threshold)
+        
+        #performs dot product between all nodes with attached object detections and prior detected objects
+        for object_index, object_occurences in enumerate(prior_objects):
+            similarity_matrix_across_prior_occurences = torch.einsum("nc,mc->nm", torch.stack(object_occurences), full_nodes)
+            similarity_matrix[object_index] = similarity_matrix_across_prior_occurences.max(dim=0).values.cpu()
+
+        # solve arrangement problem, find a matching between prior objects (+ threshold values) that maximizes the sum of similarity    
+        prior_indices, node_indices = linear_sum_assignment(similarity_matrix.detach(), maximize=True)
+        
+        for prior_index, node_index in zip(prior_indices, node_indices):
+            # object matched with one of the threshold objects, and thus should be added as a new object
+            #ensure that if node indices are out of order, we add it to the correct spot in prior_objects
+            for new_object_idx in range(prior_index - (len(prior_objects)-1)):
+                prior_objects.append([])
+            # object matched with a prior object it, append it to the list of older objects
+            else:
+                prior_objects[prior_index].append(full_nodes[node_index])
+
+        return (prior_objects, prior_indices, node_indices)
 
 
+    def forward(self, node_sequence, edge_sequence, network_mask, edge_idx_to_node):
+        batch_size = node_sequence.shape[0]
+        seq_len = node_sequence.shape[1]
+        num_objects = node_sequence.shape[2]
+
+        batch_node_indices = []
+        batch_occluded_objects = []
+        for batch_idx in range(batch_size):
+            prior_objects = []
+
+            batch_node_indices.append([])
+            batch_occluded_objects.append([])
+
+            for sequence_idx in range(seq_len):
+                curr_nodes = node_sequence[batch_idx, sequence_idx]
+                curr_network_mask = network_mask[batch_idx, sequence_idx]
+
+                nonempty_nodes = curr_nodes[curr_network_mask]
+                
+                prior_objects, prior_indices, node_indices = self.match_graph(prior_objects, nonempty_nodes)
+                
+                if len(node_indices) < len(prior_objects):
+                    for obj_idx in range(len(prior_objects)):
+                        if obj_idx not in node_indices:
+                            batch_occluded_objects[-1].append(obj_idx)
+
+                batch_node_indices[-1].append(node_indices)
+
+                
+
+                node_sequence[batch_idx, sequence_idx, prior_indices] = nonempty_nodes[node_indices]
+                if len(batch_occluded_objects[-1]) > 0:
+                    node_sequence[batch_idx, sequence_idx, batch_occluded_objects[-1]] = self.occluded_node_embedding(torch.Tensor([0]).to(torch.long).cuda())
+                if len(prior_objects) < num_objects:
+                    empty_idxs = torch.arange(len(prior_objects), num_objects)
+                    node_sequence[batch_idx, sequence_idx, empty_idxs] = self.empty_node_embedding(torch.Tensor([0]).to(torch.long).cuda())
+
+                # edge_new = torch.zeros_like(edge_sequence[batch_idx, sequence_idx])
+
+                # object_full_mask = edge_idx_to_node[batch_idx, sequence_idx, 1] in node_indices
+                # object_occluded_mask = edge_idx_to_node[batch_idx, sequence_idx, 1] in batch_occluded_objects[-1]
+                # object_empty_mask = edge_idx_to_node[batch_idx, sequence_idx, 1] > len(prior_objects)
+
+                # subject_full_mask = edge_idx_to_node[batch_idx, sequence_idx, 2] in node_indices
+                # subject_occluded_mask = edge_idx_to_node[batch_idx, sequence_idx, 2] in batch_occluded_objects[-1]
+                # subject_empty_mask = edge_idx_to_node[batch_idx, sequence_idx, 2] > len(prior_objects)
+
+                # edge_new
+                
+class DeformableDetrMLPPredictionHead(nn.Module):
+    """
+    Very simple multi-layer perceptron used to predict the normalized center coordinates,
+    height and width of a bounding box w.r.t. an image.
+    Copied from https://github.com/facebookresearch/detr/blob/master/models/detr.py
+    """
+
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
+        super().__init__()
+        self.num_layers = num_layers
+        h = [hidden_dim] * (num_layers - 1)
+        self.layers = nn.ModuleList(
+            nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim])
+        )
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        for i, layer in enumerate(self.layers):
+            x = nn.functional.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
+        return self.sigmoid(x)

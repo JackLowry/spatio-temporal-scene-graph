@@ -1,0 +1,38 @@
+data_path: "/home/jack/research/data/isaaclab_sg/01-31-2025:14-46-04"
+output_path: "/home/jack/research/scene_graph/spatio_temporal_sg/outputs"
+backbone_dirpath: "/home/jack/research/scene_graph/spatio_temporal_sg/backbone"
+
+# Architecture
+architecture: "SenseTime/deformable-detr"
+auxiliary_loss: True
+
+# Hyperparameters
+num_queries: 50
+ce_loss_coefficient: 2.0
+
+# Training
+batch_size: 1
+accumulate: 1
+gpus: 1
+max_epochs: 150
+max_epochs_finetune: 50
+lr_backbone: 1e-5
+lr: 1e-4
+weight_decay: 1e-4
+gradient_clip_val: 0.1
+debug: False
+resume: True
+memo: ""
+version: 0
+patience: 15
+finetune: False
+
+# Evaluation
+skip_train: False
+split: "val"
+eval_batch_size: 1
+eval_when_train_end: True
+
+# Speed up
+num_workers: 0
+precision: 32
