@@ -12,6 +12,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.strategies.ddp import DDPStrategy
+from pytorch_lightning.strategies.deepspeed import DeepSpeedStrategy
 from torch.utils.data import DataLoader
 
 from data.isaac_detr import IsaacLabDetrDataset
@@ -265,18 +266,18 @@ def main(config: DictConfig) -> None:
         train_dataset,
         collate_fn=lambda x: collate_fn(x, feature_extractor),
         batch_size=args.batch_size,
-        # pin_memory=True,
+        pin_memory=True,
         num_workers=args.num_workers,
-        # persistent_workers=True,
+        persistent_workers=True,
         shuffle=True,
     )
     val_dataloader = DataLoader(
         val_dataset,
         collate_fn=lambda x: collate_fn(x, feature_extractor),
         batch_size=args.batch_size,
-        # pin_memory=True,
+        pin_memory=True,
         num_workers=args.num_workers,
-        # persistent_workers=True,
+        persistent_workers=True,
     )
 
     # Evaluator
@@ -369,9 +370,10 @@ def main(config: DictConfig) -> None:
             gpus=args.gpus,
             max_epochs=args.max_epochs,
             gradient_clip_val=args.gradient_clip_val,
-            # strategy=DDPStrategy(find_unused_parameters=False),
+            strategy=DDPStrategy(find_unused_parameters=False),
             callbacks=[checkpoint_callback, early_stop_callback],
             accumulate_grad_batches=args.accumulate,
+            val_check_interval=0.5,
         )
         use_deterministic_algorithms()
         if trainer.is_global_zero:

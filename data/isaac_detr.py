@@ -78,9 +78,9 @@ class IsaacLabDetrDataset(Dataset):
         scene_idx = idx // self.num_objects
         object_idx = idx % self.num_objects
 
-        item_path = os.path.join(self.root_dir, str(scene_idx), f"t_{object_idx}.pkl")
+        item_path = os.path.join(self.root_dir, str(scene_idx), f"t_{object_idx}_cpu.pkl")
         with open(item_path, 'rb') as f:
-            sample = pickle.load(f)#, map_location='cpu')
+            sample = torch.load(f)#, map_location='cpu')
 
 
 
