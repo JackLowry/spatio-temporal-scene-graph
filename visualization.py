@@ -191,7 +191,7 @@ def draw_single_box(pic, box, color='red', draw_info=None):
         info = draw_info
         draw.text((x1, y1), info)
 
-def draw_image(img, boxes, labels, cmap=colormaps['tab10'].colors):
+def draw_image(img, boxes, labels, cmap=colormaps['tab20'].colors):
     pic = to_pil_image(img)
     num_obj = boxes.shape[0]
     for i in range(num_obj):
@@ -229,7 +229,8 @@ def draw_edges(edge_labels, ax, cmap, num_objects):
         edge_idx += 1
 
 def draw_graph(img, boxes, obj_labels, edge_labels):
-    cmap = colormaps['tab10'].colors
+    cmap = colormaps['nipy_spectral']
+    cmap = [cmap(x) for x in np.linspace(0, 1, boxes.shape[0])]
     num_objects = boxes.shape[0]
 
     plt.close()
