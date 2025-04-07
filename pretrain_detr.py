@@ -349,6 +349,9 @@ def main(config: DictConfig) -> None:
         monitor="validation_loss",
         filename="{epoch:02d}-{validation_loss:.2f}",
         save_last=True,
+        save_on_train_epoch_end = False,
+        every_n_epochs=1
+
     )
     early_stop_callback = EarlyStopping(
         monitor="validation_loss", patience=args.patience, verbose=True, mode="min"

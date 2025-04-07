@@ -104,7 +104,7 @@ class IsaacLabDetrDataset(Dataset):
         for object in graph["nodes"].keys():
             
             bbox = graph["nodes"][object]["bbox"]
-            bbox = torch.tensor(bbox)
+            bbox = torch.Tensor(bbox)
 
             #scale according to scale factor
             bbox = bbox*self.scale_factor
