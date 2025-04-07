@@ -128,78 +128,78 @@ class IsaacLabDetrDataset(Dataset):
             object_to_training_idxs[object] = training_idx_counter
             training_idx_counter += 1 
 
-        while len(object_data) < self.num_objects:
-            object_data.append({
-                "bbox": torch.zeros((1,4)).to(torch.float),
-                "object_label": torch.Tensor([self.no_object_label])
-            })      
-            node_network_mask.append(0)
+        # while len(object_data) < self.num_objects:
+        #     object_data.append({
+        #         "bbox": torch.zeros((1,4)).to(torch.float),
+        #         "object_label": torch.Tensor([self.no_object_label])
+        #     })      
+        #     node_network_mask.append(0)
 
-        node_network_mask = torch.Tensor(node_network_mask) == 1
+        # node_network_mask = torch.Tensor(node_network_mask) == 1
 
-        relation_data = [None]*(self.num_objects*(self.num_objects))
+        # relation_data = [None]*(self.num_objects*(self.num_objects))
 
-        edge_idx_to_node_idxs = [None]*(self.num_objects*(self.num_objects))
+        # edge_idx_to_node_idxs = [None]*(self.num_objects*(self.num_objects))
 
-        edge_network_mask = [False]*(self.num_objects*(self.num_objects))
+        # edge_network_mask = [False]*(self.num_objects*(self.num_objects))
 
-        for relation_tuple in graph["edges"].keys():
-            # import pdb; pdb.set_trace()
+        # for relation_tuple in graph["edges"].keys():
+        #     # import pdb; pdb.set_trace()
 
-            relationship_label = graph["edges"][relation_tuple]["name"]
-            relation = graph["edges"][relation_tuple]["relation_id"]
-            subject_id = relation_tuple[0]
-            object_id = relation_tuple[1]
+        #     relationship_label = graph["edges"][relation_tuple]["name"]
+        #     relation = graph["edges"][relation_tuple]["relation_id"]
+        #     subject_id = relation_tuple[0]
+        #     object_id = relation_tuple[1]
                 
-            subject = relation_tuple[0]
-            object = relation_tuple[1]
+        #     subject = relation_tuple[0]
+        #     object = relation_tuple[1]
 
-            bbox = graph["edges"][relation_tuple]["bbox"]
-            bbox = torch.Tensor(bbox).unsqueeze(0)
-            bbox = bbox*self.scale_factor
-            bbox = torch.round(bbox)
+        #     bbox = graph["edges"][relation_tuple]["bbox"]
+        #     bbox = torch.Tensor(bbox).unsqueeze(0)
+        #     bbox = bbox*self.scale_factor
+        #     bbox = torch.round(bbox)
 
-            relation_data_idx = object_to_training_idxs[subject]*self.num_objects + object_to_idx[object]
-            edge_idx_to_node_idxs[relation_data_idx] = [relation_data_idx, object_to_idx[subject_id], object_to_idx[object_id]]
-            if node_network_mask[object_to_idx[subject_id]] == 0 or node_network_mask[object_to_idx[object_id]] == 0:
-                edge_network_mask[relation_data_idx] = False
-                bbox[:] = 0
-            else:
-                edge_network_mask[relation_data_idx] = True
+        #     relation_data_idx = object_to_training_idxs[subject]*self.num_objects + object_to_idx[object]
+        #     edge_idx_to_node_idxs[relation_data_idx] = [relation_data_idx, object_to_idx[subject_id], object_to_idx[object_id]]
+        #     if node_network_mask[object_to_idx[subject_id]] == 0 or node_network_mask[object_to_idx[object_id]] == 0:
+        #         edge_network_mask[relation_data_idx] = False
+        #         bbox[:] = 0
+        #     else:
+        #         edge_network_mask[relation_data_idx] = True
 
 
-            dist = graph["edges"][relation_tuple]["xyz_offset"]
-            dist = torch.Tensor(dist).squeeze().unsqueeze(0)
+        #     dist = graph["edges"][relation_tuple]["xyz_offset"]
+        #     dist = torch.Tensor(dist).squeeze().unsqueeze(0)
 
-            relation_data[relation_data_idx] = {
-                "relationship_label": torch.Tensor([relation]),
-                "bbox": bbox.to(torch.float),
-                "dist": dist
-            }
+        #     relation_data[relation_data_idx] = {
+        #         "relationship_label": torch.Tensor([relation]),
+        #         "bbox": bbox.to(torch.float),
+        #         "dist": dist
+        #     }
 
-        edge_network_mask = [edge_network_mask[i] for i in range(len(edge_network_mask)) if relation_data[i]  is not None]
-        relation_data = [relation_data[i] for i in range(len(relation_data)) if relation_data[i] is not None]
-        edge_idx_to_node_idxs = [edge_idx_to_node_idxs[i] for i in range(len(edge_idx_to_node_idxs)) if edge_idx_to_node_idxs[i] is not None]
-        edge_idx_to_node_idxs = torch.Tensor(edge_idx_to_node_idxs)
-        edge_idx_to_node_idxs[:, 0] = edge_idx_to_node_idxs[:, 0] - (1+edge_idx_to_node_idxs[:, 0]//(self.num_objects+1))
-        edge_network_mask = torch.Tensor(edge_network_mask) == 1
+        # edge_network_mask = [edge_network_mask[i] for i in range(len(edge_network_mask)) if relation_data[i]  is not None]
+        # relation_data = [relation_data[i] for i in range(len(relation_data)) if relation_data[i] is not None]
+        # edge_idx_to_node_idxs = [edge_idx_to_node_idxs[i] for i in range(len(edge_idx_to_node_idxs)) if edge_idx_to_node_idxs[i] is not None]
+        # edge_idx_to_node_idxs = torch.Tensor(edge_idx_to_node_idxs)
+        # edge_idx_to_node_idxs[:, 0] = edge_idx_to_node_idxs[:, 0] - (1+edge_idx_to_node_idxs[:, 0]//(self.num_objects+1))
+        # edge_network_mask = torch.Tensor(edge_network_mask) == 1
 
-        object_ret_data  = {
-            "bbox": torch.concat([o["bbox"] for o in object_data]),
-            "object_label": torch.concat([o["object_label"] for o in object_data])
-        }
+        # object_ret_data  = {
+        #     "bbox": torch.concat([o["bbox"] for o in object_data]),
+        #     "object_label": torch.concat([o["object_label"] for o in object_data])
+        # }
 
-        relation_ret_data = {
-            "relationship_label": torch.concat([e["relationship_label"] for e in relation_data]),
-            "bbox": torch.concat([e["bbox"] for e in relation_data]),
-            "dist": torch.concat([e["dist"] for e in relation_data]),
-        }
+        # relation_ret_data = {
+        #     "relationship_label": torch.concat([e["relationship_label"] for e in relation_data]),
+        #     "bbox": torch.concat([e["bbox"] for e in relation_data]),
+        #     "dist": torch.concat([e["dist"] for e in relation_data]),
+        # }
 
         annotations = []
 
         for o in object_data:
             bbox = box_xyxy_to_cxcywh(o["bbox"]).squeeze().numpy()
-            area = bbox[-1]*bbox[-2]
+            area = bbox[-1]*bbox[-2] # width * height
             annotation = {
                 "image_id": idx,
                 "bbox": bbox,
