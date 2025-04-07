@@ -204,7 +204,7 @@ class IsaacLabDetrDataset(Dataset):
                 "image_id": idx,
                 "bbox": bbox,
                 "area": area,
-                "category_id": 0
+                "category_id": 1
             } 
             annotations.append(annotation)
 
@@ -218,6 +218,7 @@ class IsaacLabDetrDataset(Dataset):
         pixel_values = encoding["pixel_values"].squeeze()  # remove batch dimension
         target = encoding["labels"][0]  # remove batch dimension
 
+        
         # return_data = {
         #     "nodes": object_ret_data,
         #     "edges": relation_ret_data,

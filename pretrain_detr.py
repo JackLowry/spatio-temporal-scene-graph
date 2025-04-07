@@ -7,34 +7,74 @@ from pathlib import Path
 
 import pytorch_lightning as pl
 import torch
-from pytorch_lightning import Trainer, seed_everything
+from pytorch_lightning import Callback, Trainer, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.strategies.ddp import DDPStrategy
 from pytorch_lightning.strategies.deepspeed import DeepSpeedStrategy
 from torch.utils.data import DataLoader
+import wandb
 
 from data.isaac_detr import IsaacLabDetrDataset
 
 # from data.open_image import OIDetection
 # from data.visual_genome import VGDetection
-# from lib.evaluation.coco_eval import CocoEvaluator
-# from lib.evaluation.oi_eval import OICocoEvaluator
-from egtr.deformable_detr import (
+from egtr.lib.evaluation.coco_eval import CocoEvaluator
+from egtr.lib.evaluation.oi_eval import OICocoEvaluator
+from egtr.lib.fpn import box_utils
+from stowegtr import (
     DeformableDetrConfig,
     DeformableDetrFeatureExtractor,
     DeformableDetrFeatureExtractorWithAugmentor,
     DeformableDetrForObjectDetection,
 )
 from util.misc import use_deterministic_algorithms
-
+from util.box_ops import box_cxcywh_to_xyxy
 from omegaconf import DictConfig, OmegaConf
 import hydra
 
+from visualization import draw_graph
 
 seed_everything(42, workers=True)
 
+class LogPredictionSamplesCallback(Callback):
+    def __init__(self, logger: WandbLogger):
+        super().__init__()
+        self.logger = logger
+    def on_validation_batch_end(
+        self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx
+    ):
+        """Called when the validation batch ends."""
+
+        # `outputs` comes from `LightningModule.validation_step`
+        # which corresponds to our model predictions in this case
+
+        # Let's log 1 sample image predictions from the first batch
+        if batch_idx == 0:
+
+            boxes = outputs.pred_boxes[0]
+            labels = torch.nn.functional.softmax(outputs.logits[0], dim=-1)
+            labels = torch.argmax(labels, dim=-1)
+            boxes = boxes[labels == 1]
+            boxes = boxes
+            text_labels = ["" for b in boxes] #no label
+            img = batch['pixel_values'][0].permute(1,2,0)
+
+            boxes[:, [0, 2]] *= img.shape[0]
+            boxes[:, [1, 3]] *= img.shape[1]
+
+            boxes = box_cxcywh_to_xyxy(boxes)
+
+            img = img.clone()
+            img = (img - img.min())/img.max()
+            img = img*255
+            img = img.to(torch.uint8)
+
+            img = draw_graph(img.cpu().numpy(), boxes.cpu().numpy(), text_labels, None)
+
+            # Option 1: log images with `WandbLogger.log_image`
+            self.logger.log_metrics({"pred_boxes": img})
 
 def collate_fn(batch, feature_extractor):
     pixel_values = [item[0] for item in batch]
@@ -62,6 +102,8 @@ class Detr(pl.LightningModule):
         num_queries,
         architecture,
         ce_loss_coefficient,
+        coco_evaluator,
+        oi_coco_evaluator,
         feature_extractor,
     ):
         super().__init__()
@@ -82,8 +124,8 @@ class Detr(pl.LightningModule):
         self.lr = lr
         self.lr_backbone = lr_backbone
         self.weight_decay = weight_decay
-        # self.coco_evaluator = coco_evaluator
-        # self.oi_coco_evaluator = oi_coco_evaluator
+        self.coco_evaluator = coco_evaluator
+        self.oi_coco_evaluator = oi_coco_evaluator
         self.feature_extractor = feature_extractor
         if main_trained:
             state_dict = torch.load(main_trained, map_location="cpu")["state_dict"]
@@ -121,19 +163,28 @@ class Detr(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        loss, loss_dict = self.common_step(batch, batch_idx)
-        loss_dict["loss"] = loss
-        del loss
-        return loss_dict
+
+        pixel_values = batch["pixel_values"]
+        pixel_mask = batch["pixel_mask"]
+        labels = batch["labels"]
+
+        outputs = self.model(
+            pixel_values=pixel_values, pixel_mask=pixel_mask, labels=labels
+        )
+        loss = outputs.loss        
+        outputs.loss_dict["loss"] = loss
+
+        return outputs
 
     def validation_epoch_end(self, outputs):
+
         log_dict = {
             "step": torch.tensor(self.global_step, dtype=torch.float32),
             "epoch": torch.tensor(self.current_epoch, dtype=torch.float32),
         }
-        for k in outputs[0].keys():
+        for k in outputs[0].loss_dict.keys():
             log_dict[f"validation_" + k] = (
-                torch.stack([x[k] for x in outputs]).mean().item()
+                torch.stack([x.loss_dict[k] for x in outputs]).mean().item()
             )
         self.log_dict(log_dict, on_epoch=True)
 
@@ -254,10 +305,17 @@ def main(config: DictConfig) -> None:
     #     )
     #     id2label = train_dataset.classes_to_ind  # 0 ~ 600
 
-    data_len = len(dataset)
-    train_size = int(data_len*.9)
-    train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, data_len - train_size])
-    id2label = {0: "Unknown"}
+    if config.debug:
+        test_dataset_size = 5990
+        data_len = len(dataset) - test_dataset_size
+        train_size = int(data_len*.9) 
+        train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, data_len - train_size, test_dataset_size])
+    else:
+        data_len = len(dataset)
+        train_size = int(data_len*.9)
+        train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, data_len - train_size])
+    
+    id2label = {0: "No Object", 1: "Object"}
     print("Number of training examples:", len(train_dataset))
     print("Number of validation examples:", len(val_dataset))
 
@@ -281,20 +339,14 @@ def main(config: DictConfig) -> None:
     )
 
     # Evaluator
-    # if args.eval_when_train_end:
-    #     if "visual_genome" in args.data_path:
-    #         coco_evaluator = CocoEvaluator(
-    #             val_dataset.coco, ["bbox"]
-    #         )  # initialize evaluator with ground truths
-    #         oi_coco_evaluator = None
-    #     elif "open-image" in args.data_path:
-    #         oi_coco_evaluator = OICocoEvaluator(
-    #             train_dataset.rel_categories, train_dataset.ind_to_classes
-    #         )
-    #         coco_evaluator = None
-    # else:
-    #     coco_evaluator = None
-    #     oi_coco_evaluator = None
+    if args.eval_when_train_end:
+        oi_coco_evaluator = OICocoEvaluator(
+            dataset.num_relationship_labels, {0:"None"}
+        )
+        coco_evaluator = None
+    else:
+        coco_evaluator = None
+        oi_coco_evaluator = None
 
     # Logger setting
     save_dir = (
@@ -310,9 +362,12 @@ def main(config: DictConfig) -> None:
     else:
         version = None  #  If version is not specified the logger inspects the save directory for existing versions, then automatically assigns the next available version.
 
+    
+
     # Trainer setting
     logger = WandbLogger(save_dir=save_dir, name=name, version=version,
-                         project="sggen-pretrain-detr")
+                         project="sggen-pretrain-detr",
+                         )
     if os.path.exists(f"{logger.save_dir}/checkpoints"):
         if os.path.exists(f"{logger.save_dir}/checkpoints/last.ckpt"):
             ckpt_path = f"{logger.save_dir}/checkpoints/last.ckpt"
@@ -336,8 +391,8 @@ def main(config: DictConfig) -> None:
         num_queries=args.num_queries,
         architecture=args.architecture,
         ce_loss_coefficient=args.ce_loss_coefficient,
-        # coco_evaluator=coco_evaluator,
-        # oi_coco_evaluator=oi_coco_evaluator,
+        coco_evaluator=coco_evaluator,
+        oi_coco_evaluator=oi_coco_evaluator,
         feature_extractor=feature_extractor,
     )
 
@@ -356,16 +411,18 @@ def main(config: DictConfig) -> None:
     early_stop_callback = EarlyStopping(
         monitor="validation_loss", patience=args.patience, verbose=True, mode="min"
     )
+    
+    log_pred_callback = LogPredictionSamplesCallback(logger)
 
     # Train
     trainer = None
     if not args.skip_train:
         # Main training
-        # if not Path(
-        #     WandbLogger(
-        #         save_dir, name=f"{name}__finetune", version=version
-        #     ).log_dir
-        # ).exists():
+
+        print(logger.save_dir)
+        print(ckpt_path)
+        # quit()
+
             # Training
         trainer = Trainer(
             precision=args.precision,
@@ -374,9 +431,9 @@ def main(config: DictConfig) -> None:
             max_epochs=args.max_epochs,
             gradient_clip_val=args.gradient_clip_val,
             strategy=DDPStrategy(find_unused_parameters=False),
-            callbacks=[checkpoint_callback, early_stop_callback],
+            callbacks=[checkpoint_callback, early_stop_callback, log_pred_callback],
             accumulate_grad_batches=args.accumulate,
-            val_check_interval=0.5,
+            log_every_n_steps=10,
         )
         use_deterministic_algorithms()
         if trainer.is_global_zero:
@@ -388,69 +445,32 @@ def main(config: DictConfig) -> None:
         except PermissionError as e:
             print(e)
 
-        # Finetuning
-        # if args.finetune:
-        #     ckpt_path = sorted(
-        #         glob(f"{logger.log_dir}/checkpoints/epoch=*.ckpt"),
-        #         key=lambda x: int(x.split("epoch=")[1].split("-")[0]),
-        #     )[-1]
+        # load best model & save best model as pytorch_model.bin
+        ckpt_path = checkpoint_callback.best_model_path
+        print(ckpt_path)
 
-        #     # Finetune trainer setting
+        state_dict = torch.load(ckpt_path, map_location="cpu")["state_dict"]
+        for k in list(state_dict.keys()):
+            state_dict[k[6:]] = state_dict.pop(k)  # "model."
+        module.model.load_state_dict(state_dict)
+        if trainer.is_global_zero:
+            module.model.save_pretrained(logger.save_dir)
+
+        # if trainer is not None:
+        #     torch.distributed.destroy_process_group()
+        #     try:
+        #         os.chmod(logger.save_dir, 0o0777)
+        #     except PermissionError as e:
+        #         print(e)
+
+    # # Evaluation
+    if args.eval_when_train_end and (trainer is None or trainer.is_global_zero):
+        # if args.skip_train and args.finetune:
         #     logger = TensorBoardLogger(
         #         save_dir, name=f"{name}__finetune", version=version
         #     )
-        #     if os.path.exists(f"{logger.log_dir}/checkpoints"):
-        #         finetune_ckpt_path = f"{logger.log_dir}/checkpoints/last.ckpt"
-        #     else:
-        #         finetune_ckpt_path = None
 
-        #     # Finetune module
-        #     module = Detr(
-        #         backbone_dirpath=args.backbone_dirpath,
-        #         auxiliary_loss=args.auxiliary_loss,
-        #         lr=args.lr * 0.1,
-        #         lr_backbone=args.lr_backbone * 0.1,
-        #         weight_decay=args.weight_decay,
-        #         main_trained=ckpt_path,
-        #         id2label=id2label,
-        #         num_queries=args.num_queries,
-        #         architecture=args.architecture,
-        #         ce_loss_coefficient=args.ce_loss_coefficient,
-        #         coco_evaluator=coco_evaluator,
-        #         oi_coco_evaluator=oi_coco_evaluator,
-        #         feature_extractor=feature_extractor,
-        #     )
-
-        #     # Finetune callback
-        #     checkpoint_callback = ModelCheckpoint(
-        #         monitor="validation_loss",
-        #         filename="{epoch:02d}-{validation_loss:.2f}",
-        #         save_last=True,
-        #     )
-        #     early_stop_callback = EarlyStopping(
-        #         monitor="validation_loss",
-        #         patience=args.patience,
-        #         verbose=True,
-        #         mode="min",
-        #     )
-
-        #     # Training
-        #     trainer = Trainer(
-        #         precision=args.precision,
-        #         logger=logger,
-        #         gpus=args.gpus,
-        #         max_epochs=args.max_epochs_finetune,
-        #         gradient_clip_val=args.gradient_clip_val,
-        #         strategy=DDPStrategy(find_unused_parameters=False),
-        #         callbacks=[checkpoint_callback, early_stop_callback],
-        #         accumulate_grad_batches=args.accumulate,
-        #     )
-        #     use_deterministic_algorithms()
-        #     if trainer.is_global_zero:
-        #         print("### Finetune with smaller lr")
-        #     trainer.fit(module, ckpt_path=finetune_ckpt_path)
-
-        # load best model & save best model as pytorch_model.bin
+        # Load best model
         ckpt_path = sorted(
             glob(f"{logger.save_dir}/checkpoints/epoch=*.ckpt"),
             key=lambda x: int(x.split("epoch=")[1].split("-")[0]),
@@ -459,60 +479,16 @@ def main(config: DictConfig) -> None:
         for k in list(state_dict.keys()):
             state_dict[k[6:]] = state_dict.pop(k)  # "model."
         module.model.load_state_dict(state_dict)
+
+        # Eval
+        trainer = Trainer(
+            precision=args.precision, logger=logger, gpus=1, max_epochs=-1
+        )
+
+        test_dataloader = val_dataloader
         if trainer.is_global_zero:
-            module.model.save_pretrained(logger.save_dir)
-
-        if trainer is not None:
-            torch.distributed.destroy_process_group()
-            try:
-                os.chmod(logger.save_dir, 0o0777)
-            except PermissionError as e:
-                print(e)
-
-    # # Evaluation
-    # if args.eval_when_train_end and (trainer is None or trainer.is_global_zero):
-    #     if args.skip_train and args.finetune:
-    #         logger = TensorBoardLogger(
-    #             save_dir, name=f"{name}__finetune", version=version
-    #         )
-
-    #     # Load best model
-    #     ckpt_path = sorted(
-    #         glob(f"{logger.log_dir}/checkpoints/epoch=*.ckpt"),
-    #         key=lambda x: int(x.split("epoch=")[1].split("-")[0]),
-    #     )[-1]
-    #     state_dict = torch.load(ckpt_path, map_location="cpu")["state_dict"]
-    #     for k in list(state_dict.keys()):
-    #         state_dict[k[6:]] = state_dict.pop(k)  # "model."
-    #     module.model.load_state_dict(state_dict)
-
-    #     # Eval
-    #     trainer = Trainer(
-    #         precision=args.precision, logger=logger, gpus=1, max_epochs=-1
-    #     )
-    #     if "visual_genome" in args.data_path:
-    #         test_dataset = VGDetection(
-    #             data_folder=args.data_path,
-    #             feature_extractor=feature_extractor,
-    #             split=args.split,
-    #         )
-    #     else:
-    #         test_dataset = OIDetection(
-    #             data_folder=args.data_path,
-    #             feature_extractor=feature_extractor,
-    #             split=args.split,
-    #         )
-    #     test_dataloader = DataLoader(
-    #         test_dataset,
-    #         collate_fn=lambda x: collate_fn(x, feature_extractor),
-    #         batch_size=args.eval_batch_size,
-    #         pin_memory=True,
-    #         num_workers=args.num_workers,
-    #         persistent_workers=True,
-    #     )
-    #     if trainer.is_global_zero:
-    #         print("### Evaluation")
-    #     trainer.test(module, dataloaders=test_dataloader)
+            print("### Evaluation")
+        trainer.test(module, dataloaders=test_dataloader)
 
 if __name__ == "__main__":
     main()
