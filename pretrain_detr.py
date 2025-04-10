@@ -56,7 +56,7 @@ class LogPredictionSamplesCallback(Callback):
             boxes = outputs.pred_boxes[0]
             labels = torch.nn.functional.softmax(outputs.logits[0], dim=-1)
             labels = torch.argmax(labels, dim=-1)
-            boxes = boxes[labels == 1]
+            boxes = boxes[labels == 0]
             boxes = boxes
             text_labels = ["" for b in boxes] #no label
             img = batch['pixel_values'][0].permute(1,2,0)
@@ -315,7 +315,7 @@ def main(config: DictConfig) -> None:
         train_size = int(data_len*.9)
         train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, data_len - train_size])
     
-    id2label = {0: "No Object", 1: "Object"}
+    id2label = {0: "Object", 1: "No Object"}
     print("Number of training examples:", len(train_dataset))
     print("Number of validation examples:", len(val_dataset))
 
@@ -471,10 +471,7 @@ def main(config: DictConfig) -> None:
         #     )
 
         # Load best model
-        ckpt_path = sorted(
-            glob(f"{logger.save_dir}/checkpoints/epoch=*.ckpt"),
-            key=lambda x: int(x.split("epoch=")[1].split("-")[0]),
-        )[-1]
+        ckpt_path = checkpoint_callback.best_model_path
         state_dict = torch.load(ckpt_path, map_location="cpu")["state_dict"]
         for k in list(state_dict.keys()):
             state_dict[k[6:]] = state_dict.pop(k)  # "model."
