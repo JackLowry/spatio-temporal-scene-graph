@@ -204,7 +204,7 @@ class IsaacLabDetrDataset(Dataset):
                 "image_id": idx,
                 "bbox": bbox,
                 "area": area,
-                "category_id": 1
+                "category_id": 0
             } 
             annotations.append(annotation)
 
