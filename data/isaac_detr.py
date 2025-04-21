@@ -228,4 +228,6 @@ class IsaacLabDetrDataset(Dataset):
         #     "node_network_mask": torch.stack(sequence_node_network_mask),
         #     "edge_network_mask": torch.stack(sequence_edge_network_mask)
         # }
+        if self.return_raw_image:
+            return (pixel_values, image), target
         return pixel_values, target 
