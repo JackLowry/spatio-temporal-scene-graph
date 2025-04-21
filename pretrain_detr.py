@@ -52,22 +52,24 @@ class LogPredictionSamplesCallback(Callback):
 
         # Let's log 1 sample image predictions from the first batch
         if batch_idx == 0:
+            labels = [
+                {k: v for k, v in t.items()} for t in batch["labels"]
+            ]  
+            orig_target_sizes = torch.stack(
+                [target["orig_size"] for target in labels], dim=0
+            )
+            results = pl_module.feature_extractor.post_process(
+                outputs, orig_target_sizes
+            )  # convert outputs of model to COCO api
 
-            boxes = outputs.pred_boxes[0]
-            labels = torch.nn.functional.softmax(outputs.logits[0], dim=-1)
-            labels = torch.argmax(labels, dim=-1)
-            boxes = boxes[labels == 0]
-            boxes = boxes
+            orig_img = batch["orig_img"][0]
+            boxes = results[0]["boxes"].to(torch.int).clamp(0, 512)
+            labels = results[0]['labels']
             text_labels = ["" for b in boxes] #no label
-            img = batch['pixel_values'][0].permute(1,2,0)
-
-            boxes[:, [0, 2]] *= img.shape[0]
-            boxes[:, [1, 3]] *= img.shape[1]
-
-            boxes = box_cxcywh_to_xyxy(boxes)
+            img = orig_img
 
             img = img.clone()
-            img = (img - img.min())/img.max()
+            # img = (img - img.min())/img.max()
             img = img*255
             img = img.to(torch.uint8)
 
@@ -77,7 +79,8 @@ class LogPredictionSamplesCallback(Callback):
             self.logger.log_metrics({"pred_boxes": img})
 
 def collate_fn(batch, feature_extractor):
-    pixel_values = [item[0] for item in batch]
+    orig_img = [item[0][1] for item in batch]
+    pixel_values = [item[0][0] for item in batch]
     encoding = feature_extractor.pad_and_create_pixel_mask(
         pixel_values, return_tensors="pt"
     )
@@ -86,7 +89,9 @@ def collate_fn(batch, feature_extractor):
     batch["pixel_values"] = encoding["pixel_values"]
     batch["pixel_mask"] = encoding["pixel_mask"]
     batch["labels"] = labels
+    batch["orig_img"] = orig_img
     return batch
+
 
 
 class Detr(pl.LightningModule):
@@ -277,6 +282,7 @@ def main(config: DictConfig) -> None:
     dataset = IsaacLabDetrDataset(
         root_dir=args.data_path,
         feature_extractor=feature_extractor_train,
+        return_raw_image=True
     )
 
 
@@ -406,7 +412,6 @@ def main(config: DictConfig) -> None:
         save_last=True,
         save_on_train_epoch_end = False,
         every_n_epochs=1
-
     )
     early_stop_callback = EarlyStopping(
         monitor="validation_loss", patience=args.patience, verbose=True, mode="min"

@@ -16,7 +16,8 @@ class IsaacLabDetrDataset(Dataset):
     def __init__(self, root_dir,
                  feature_extractor, 
                  scale_factor=1, 
-                 transform=None):
+                 transform=None,
+                 return_raw_image=False):
         """
         Arguments:
             root_dir (string): Directory with all the images.
@@ -61,6 +62,8 @@ class IsaacLabDetrDataset(Dataset):
 
         self.num_graphs = self.num_scenes * self.num_objects
         self.scale_factor = scale_factor
+
+        self.return_raw_image = return_raw_image
 
     def __len__(self):
         return self.num_graphs
@@ -228,4 +231,6 @@ class IsaacLabDetrDataset(Dataset):
         #     "node_network_mask": torch.stack(sequence_node_network_mask),
         #     "edge_network_mask": torch.stack(sequence_edge_network_mask)
         # }
+        if self.return_raw_image:
+            return (pixel_values, image), target
         return pixel_values, target 
