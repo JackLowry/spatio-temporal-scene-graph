@@ -20,8 +20,8 @@ from data.isaac_detr import IsaacLabDetrDataset
 
 # from data.open_image import OIDetection
 # from data.visual_genome import VGDetection
-from egtr.lib.evaluation.coco_eval import CocoEvaluator
-from egtr.lib.evaluation.oi_eval import OICocoEvaluator
+
+from data.temporal_isaac_detr import TemporalIsaacLabDetrDataset
 from egtr.lib.fpn import box_utils
 from temporal_detr import (
     DeformableDetrConfig,
@@ -52,24 +52,24 @@ class LogPredictionSamplesCallback(Callback):
 
         # Let's log 1 sample image predictions from the first batch
         if batch_idx == 0:
-            labels = [
-                {k: v for k, v in t.items()} for t in batch["labels"]
-            ]  
-            orig_target_sizes = torch.stack(
-                [target["orig_size"] for target in labels], dim=0
-            )
-            results = pl_module.feature_extractor.post_process(
-                outputs, orig_target_sizes
-            )  # convert outputs of model to COCO api
 
-            orig_img = batch["orig_img"][0]
-            boxes = results[0]["boxes"].to(torch.int).clamp(0, 512)
-            labels = results[0]['labels']
+            seq_id = -1
+
+            boxes = outputs.pred_boxes[0, seq_id]
+            labels = torch.nn.functional.softmax(outputs.logits[0, seq_id], dim=-1)
+            labels = torch.argmax(labels, dim=-1)
+            boxes = boxes[labels == 0]
+            boxes = boxes
             text_labels = ["" for b in boxes] #no label
-            img = orig_img
+            img = batch['pixel_values'][0, seq_id].permute(1,2,0)
+
+            boxes[:, [0, 2]] *= img.shape[0]
+            boxes[:, [1, 3]] *= img.shape[1]
+
+            boxes = box_cxcywh_to_xyxy(boxes)
 
             img = img.clone()
-            # img = (img - img.min())/img.max()
+            img = (img - img.min())/img.max()
             img = img*255
             img = img.to(torch.uint8)
 
@@ -79,22 +79,38 @@ class LogPredictionSamplesCallback(Callback):
             self.logger.log_metrics({"pred_boxes": img})
 
 def collate_fn(batch, feature_extractor):
-    orig_img = [item[0][1] for item in batch]
-    pixel_values = [item[0][0] for item in batch]
+
+    batch_processed = {}
+    batch_processed["pixel_values"] = []
+    batch_processed["pixel_mask"] = []
+    batch_processed["labels"] = []
+    batch_processed["orig_img"] = []
+    pixel_values = []
+    orig_img = []
+
+    seq_len = len(batch[0][0][0])
+    batch_size = len(batch)
+
+
+    for sample in batch:
+        batch_processed["labels"].append(sample[1])
+        batch_processed["orig_img"].append(torch.stack(sample[0][1]))
+        for seq_id in range(seq_len):
+            pixel_values.append(sample[0][0][seq_id])
+        
     encoding = feature_extractor.pad_and_create_pixel_mask(
         pixel_values, return_tensors="pt"
-    )
-    labels = [item[1] for item in batch]
-    batch = {}
-    batch["pixel_values"] = encoding["pixel_values"]
-    batch["pixel_mask"] = encoding["pixel_mask"]
-    batch["labels"] = labels
-    batch["orig_img"] = orig_img
-    return batch
+    )        
+
+    batch_processed["orig_img"] = torch.stack(batch_processed["orig_img"])
+
+    batch_processed["pixel_values"] = encoding["pixel_values"].reshape(batch_size, seq_len, *encoding["pixel_values"].shape[1:])
+    batch_processed["pixel_mask"] = encoding["pixel_mask"].reshape(batch_size, seq_len, *encoding["pixel_mask"].shape[1:])
+
+    return batch_processed
 
 
-
-class Detr(pl.LightningModule):
+class TemporalDetr(pl.LightningModule):
     def __init__(
         self,
         backbone_dirpath,
@@ -107,8 +123,6 @@ class Detr(pl.LightningModule):
         num_queries,
         architecture,
         ce_loss_coefficient,
-        coco_evaluator,
-        oi_coco_evaluator,
         feature_extractor,
     ):
         super().__init__()
@@ -129,8 +143,6 @@ class Detr(pl.LightningModule):
         self.lr = lr
         self.lr_backbone = lr_backbone
         self.weight_decay = weight_decay
-        self.coco_evaluator = coco_evaluator
-        self.oi_coco_evaluator = oi_coco_evaluator
         self.feature_extractor = feature_extractor
         if main_trained:
             state_dict = torch.load(main_trained, map_location="cpu")["state_dict"]
@@ -142,7 +154,8 @@ class Detr(pl.LightningModule):
         outputs = self.model(pixel_values=pixel_values, pixel_mask=pixel_mask)
         return outputs
 
-    def common_step(self, batch, batch_idx):
+    def common_step(self, batch, batch_idx, ret_outputs=False):
+        
         pixel_values = batch["pixel_values"]
         pixel_mask = batch["pixel_mask"]
         labels = batch["labels"]
@@ -150,6 +163,9 @@ class Detr(pl.LightningModule):
         outputs = self.model(
             pixel_values=pixel_values, pixel_mask=pixel_mask, labels=labels
         )
+
+        if ret_outputs:
+            return outputs
         loss = outputs.loss
         loss_dict = outputs.loss_dict
         del outputs
@@ -169,13 +185,7 @@ class Detr(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
 
-        pixel_values = batch["pixel_values"]
-        pixel_mask = batch["pixel_mask"]
-        labels = batch["labels"]
-
-        outputs = self.model(
-            pixel_values=pixel_values, pixel_mask=pixel_mask, labels=labels
-        )
+        outputs = self.common_step(batch, batch_idx, ret_outputs=True)
         loss = outputs.loss        
         outputs.loss_dict["loss"] = loss
 
@@ -214,20 +224,10 @@ class Detr(pl.LightningModule):
         res = {
             target["image_id"].item(): output for target, output in zip(labels, results)
         }
-        if self.coco_evaluator is not None:
-            self.coco_evaluator.update(res)
-        if self.oi_coco_evaluator is not None:
-            self.oi_coco_evaluator(labels, res)
 
-    def test_epoch_end(self, outputs):
-        # log OD
-        if self.coco_evaluator is not None:
-            self.coco_evaluator.synchronize_between_processes()
-            self.coco_evaluator.accumulate()
-            self.coco_evaluator.summarize()
-            self.log("AP50", self.coco_evaluator.coco_eval["bbox"].stats[1])
-        if self.oi_coco_evaluator is not None:
-            self.log_dict(self.oi_coco_evaluator.aggregate_metrics())
+
+    # def test_epoch_end(self, outputs):
+
 
     def configure_optimizers(self):
         diff_lr_params = ["backbone", "reference_points", "sampling_offsets"]
@@ -261,7 +261,7 @@ class Detr(pl.LightningModule):
 
 
 config_name = "default.yaml"
-@hydra.main(version_base=None, config_path="conf/pretrain_detr", config_name=config_name)
+@hydra.main(version_base=None, config_path="conf/temporal_detr", config_name=config_name)
 def main(config: DictConfig) -> None:
     # torch.multiprocessing.set_start_method('spawn', force=True)
     
@@ -279,48 +279,21 @@ def main(config: DictConfig) -> None:
         )
     )
 
-    dataset = IsaacLabDetrDataset(
+    dataset = TemporalIsaacLabDetrDataset(
         root_dir=args.data_path,
         feature_extractor=feature_extractor_train,
-        return_raw_image=True
     )
 
-
-    # Dataset
-    # if "visual_genome" in args.data_path:
-    #     train_dataset = VGDetection(
-    #         data_folder=args.data_path,
-    #         feature_extractor=feature_extractor_train,
-    #         split="train",
-    #         debug=args.debug,
-    #     )
-    #     val_dataset = VGDetection(
-    #         data_folder=args.data_path, feature_extractor=feature_extractor, split="val"
-    #     )
-    #     cats = train_dataset.coco.cats
-    #     id2label = {k - 1: v["name"] for k, v in cats.items()}  # 0 ~ 149
+    # if config.debug:
+    #     test_dataset_size = 5990
+    #     data_len = len(dataset) - test_dataset_size
+    #     train_size = int(data_len*.9) 
+    #     train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, data_len - train_size, test_dataset_size])
     # else:
-    #     train_dataset = OIDetection(
-    #         data_folder=args.data_path,
-    #         feature_extractor=feature_extractor_train,
-    #         split="train",
-    #         debug=args.debug,
-    #     )
-    #     val_dataset = OIDetection(
-    #         data_folder=args.data_path, feature_extractor=feature_extractor, split="val"
-    #     )
-    #     id2label = train_dataset.classes_to_ind  # 0 ~ 600
+    data_len = len(dataset)
+    train_size = int(data_len*.9)
+    train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, data_len - train_size])
 
-    if config.debug:
-        test_dataset_size = 5990
-        data_len = len(dataset) - test_dataset_size
-        train_size = int(data_len*.9) 
-        train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, data_len - train_size, test_dataset_size])
-    else:
-        data_len = len(dataset)
-        train_size = int(data_len*.9)
-        train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, data_len - train_size])
-    
     id2label = {0: "Object", 1: "No Object"}
     print("Number of training examples:", len(train_dataset))
     print("Number of validation examples:", len(val_dataset))
@@ -344,16 +317,6 @@ def main(config: DictConfig) -> None:
         persistent_workers=True,
     )
 
-    # Evaluator
-    if args.eval_when_train_end:
-        oi_coco_evaluator = OICocoEvaluator(
-            dataset.num_relationship_labels, {0:"None"}
-        )
-        coco_evaluator = None
-    else:
-        coco_evaluator = None
-        oi_coco_evaluator = None
-
     # Logger setting
     save_dir = (
         f"{args.output_path}/pretrained_detr__{args.architecture.replace('/', '__')}"
@@ -372,21 +335,13 @@ def main(config: DictConfig) -> None:
 
     # Trainer setting
     logger = WandbLogger(save_dir=save_dir, name=name, version=version,
-                         project="sggen-pretrain-detr",
+                         project="sggen-temporal-detr",
                          )
-    if os.path.exists(f"{logger.save_dir}/checkpoints"):
-        if os.path.exists(f"{logger.save_dir}/checkpoints/last.ckpt"):
-            ckpt_path = f"{logger.save_dir}/checkpoints/last.ckpt"
-        else:
-            ckpt_path = sorted(
-                glob(f"{logger.save_dir}/checkpoints/epoch=*.ckpt"),
-                key=lambda x: int(x.split("epoch=")[1].split("-")[0]),
-            )[-1]
-    else:
-        ckpt_path = None
+
+    ckpt_path = None
 
     # Module
-    module = Detr(
+    module = TemporalDetr(
         backbone_dirpath=args.backbone_dirpath,
         auxiliary_loss=args.auxiliary_loss,
         lr=args.lr,
@@ -397,8 +352,6 @@ def main(config: DictConfig) -> None:
         num_queries=args.num_queries,
         architecture=args.architecture,
         ce_loss_coefficient=args.ce_loss_coefficient,
-        coco_evaluator=coco_evaluator,
-        oi_coco_evaluator=oi_coco_evaluator,
         feature_extractor=feature_extractor,
     )
 
@@ -412,6 +365,7 @@ def main(config: DictConfig) -> None:
         save_last=True,
         save_on_train_epoch_end = False,
         every_n_epochs=1
+
     )
     early_stop_callback = EarlyStopping(
         monitor="validation_loss", patience=args.patience, verbose=True, mode="min"

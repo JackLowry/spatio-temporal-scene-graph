@@ -211,6 +211,7 @@ class DeformableDetrConfig(PretrainedConfig):
         dice_loss_coefficient=1,
         bbox_loss_coefficient=5,
         giou_loss_coefficient=2,
+        contrastive_loss_coefficient=1,
         eos_coefficient=0.1,
         focal_alpha=0.25,
         **kwargs,
@@ -254,6 +255,7 @@ class DeformableDetrConfig(PretrainedConfig):
         self.dice_loss_coefficient = dice_loss_coefficient
         self.bbox_loss_coefficient = bbox_loss_coefficient
         self.giou_loss_coefficient = giou_loss_coefficient
+        self.contrastive_loss_coefficient = contrastive_loss_coefficient
         self.eos_coefficient = eos_coefficient
         self.focal_alpha = focal_alpha
         super().__init__(is_encoder_decoder=is_encoder_decoder, **kwargs)
@@ -2157,7 +2159,7 @@ class DeformableDetrModel(DeformableDetrPreTrainedModel):
         object_query = object_query.masked_fill(~output_proposals_valid, float(0))
         object_query = self.enc_output_norm(self.enc_output(object_query))
         return object_query, output_proposals
-
+    
     def forward(
         self,
         pixel_values,
@@ -2202,7 +2204,7 @@ class DeformableDetrModel(DeformableDetrPreTrainedModel):
             return_dict if return_dict is not None else self.config.use_return_dict
         )
 
-        batch_size, num_channels, height, width = pixel_values.shape
+
         device = pixel_values.device
 
         if pixel_mask is None:
@@ -2397,7 +2399,7 @@ class DeformableDetrModel(DeformableDetrPreTrainedModel):
     """,
     DEFORMABLE_DETR_START_DOCSTRING,
 )
-class DeformableDetrForObjectDetection(DeformableDetrPreTrainedModel):
+class TemporalDeformableDetrForObjectDetection(DeformableDetrPreTrainedModel):
     def __init__(self, config: DeformableDetrConfig):
         super().__init__(config)
 
@@ -2412,7 +2414,7 @@ class DeformableDetrForObjectDetection(DeformableDetrPreTrainedModel):
             output_dim=4,
             num_layers=3,
         )
-
+        self.object_embedding_head = nn.Linear(config.d_model, config.d_model)
         prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
         self.class_embed.bias.data = torch.ones(config.num_labels) * bias_value
@@ -2447,13 +2449,13 @@ class DeformableDetrForObjectDetection(DeformableDetrPreTrainedModel):
 
     # taken from https://github.com/facebookresearch/detr/blob/master/models/detr.py
     @torch.jit.unused
-    def _set_aux_loss(self, outputs_class, outputs_coord):
+    def _set_aux_loss(self, outputs_class, outputs_coord, hidden_states):
         # this is a workaround to make torchscript happy, as torchscript
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
         return [
-            {"logits": a, "pred_boxes": b}
-            for a, b in zip(outputs_class[:-1], outputs_coord[:-1])
+            {"logits": a, "pred_boxes": b, "object_embeddings": c}
+            for a, b, c in zip(outputs_class[:-1], outputs_coord[:-1], hidden_states[:-1])
         ]
 
     def forward(
@@ -2507,6 +2509,13 @@ class DeformableDetrForObjectDetection(DeformableDetrPreTrainedModel):
         )
 
         # First, sent images through DETR base model to obtain encoder + decoder outputs
+
+        batch_size, seq_len, channel, img_x, img_y = pixel_values.shape
+        
+        pixel_values = pixel_values.reshape(-1, *pixel_values.shape[2:])
+        pixel_mask = pixel_mask.reshape(-1, *pixel_mask.shape[2:])
+
+
         outputs = self.model(
             pixel_values,
             pixel_mask=pixel_mask,
@@ -2551,17 +2560,26 @@ class DeformableDetrForObjectDetection(DeformableDetrPreTrainedModel):
             outputs_coord = outputs_coord_logits.sigmoid()
             outputs_classes.append(outputs_class)
             outputs_coords.append(outputs_coord)
-        # Keep batch_size as first dimension
+        # Keep layer_depth as first dimension
         outputs_class = torch.stack(outputs_classes, dim=1)
         outputs_coord = torch.stack(outputs_coords, dim=1)
 
-        logits = outputs_class[:, -1]
-        pred_boxes = outputs_coord[:, -1]
+
+        # shape: (batch, sequence, layer_dimension, ...)
+        outputs_class = outputs_class.reshape(batch_size, seq_len, *outputs_class.shape[1:])
+        outputs_coord = outputs_coord.reshape(batch_size, seq_len, *outputs_coord.shape[1:])
+        hidden_states = hidden_states.reshape(batch_size, seq_len, *hidden_states.shape[1:])
+        # reshape back to (batch_size, seq_len, ...), grabbing the last layer dimensions
+        logits = outputs_class[:, :, -1]
+        pred_boxes = outputs_coord[:, :, -1]
+        last_hidden = hidden_states[:, :, -1]
+
+
 
         loss, loss_dict, auxiliary_outputs = None, None, None
         if labels is not None:
             # First: create the matcher
-            matcher = DeformableDetrHungarianMatcher(
+            matcher = TemporalDeformableDetrHungarianMatcher(
                 class_cost=self.config.ce_loss_coefficient,
                 bbox_cost=self.config.bbox_cost,
                 giou_cost=self.config.giou_cost,
@@ -2580,10 +2598,17 @@ class DeformableDetrForObjectDetection(DeformableDetrPreTrainedModel):
             outputs_loss = {}
             outputs_loss["logits"] = logits
             outputs_loss["pred_boxes"] = pred_boxes
+            outputs_loss["object_embeddings"] = self.object_embedding_head(last_hidden) 
+            outputs_loss["object_embeddings"] /= torch.linalg.norm(outputs_loss["object_embeddings"], dim=-1, keepdim=True)
             if self.config.auxiliary_loss:
-                outputs_class = outputs_class.permute(1, 0, 2, 3)
-                outputs_coord = outputs_coord.permute(1, 0, 2, 3)
-                auxiliary_outputs = self._set_aux_loss(outputs_class, outputs_coord)
+                # shape: (batch, sequence, layer_dimension, ...)
+                # reorder to layer dimension out front
+                outputs_class = outputs_class.permute(2, 0, 1, 3, 4)
+                outputs_coord = outputs_coord.permute(2, 0, 1, 3, 4)
+                hidden_states = hidden_states.permute(2, 0, 1, 3, 4)
+                embeddings = self.object_embedding_head(hidden_states) 
+                embeddings /= torch.linalg.norm(hidden_states, dim=-1, keepdim=True)
+                auxiliary_outputs = self._set_aux_loss(outputs_class, outputs_coord, embeddings)
                 outputs_loss["auxiliary_outputs"] = auxiliary_outputs
             if self.config.two_stage:
                 enc_outputs_coord = outputs.enc_outputs_coord_logits.sigmoid()
@@ -2597,6 +2622,7 @@ class DeformableDetrForObjectDetection(DeformableDetrPreTrainedModel):
             weight_dict = {
                 "loss_ce": self.config.ce_loss_coefficient,
                 "loss_bbox": self.config.bbox_loss_coefficient,
+                "loss_contrastive": self.config.contrastive_loss_coefficient
             }
             weight_dict["loss_giou"] = self.config.giou_loss_coefficient
             aux_weight_dict = {}
@@ -2746,6 +2772,17 @@ class DeformableDetrLoss(nn.Module):
         losses = {"cardinality_error": card_err}
         return losses
 
+    def max_giou(self, boxes, targets):
+        source_boxes = boxes
+        target_boxes = targets
+
+        loss_giou = generalized_box_iou(
+                center_to_corners_format(source_boxes),
+                center_to_corners_format(target_boxes),
+            )
+
+        return loss_giou.max(dim=-1).values
+
     def loss_boxes(self, outputs, targets, indices, num_boxes):
         """
         Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss.
@@ -2772,8 +2809,97 @@ class DeformableDetrLoss(nn.Module):
                 center_to_corners_format(target_boxes),
             )
         )
+
         losses["loss_giou"] = loss_giou.sum() / num_boxes
         return losses
+
+    def loss_contrastive(self, frame_matched_indices, object_embeddings, pred_boxes, targets,
+                        margin=0.5, sample_num=10, giou_threshold=0.6,
+                        matching_loss_lambda=1.0, nonmatching_loss_lambda=1.0):
+        
+        seq_len = len(object_embeddings[0])
+
+        contrastive_loss = 0
+
+        all_matching_loss = 0
+        all_num_positive_matches = 0
+        all_nonmatching_loss = 0
+        all_num_hard_negatives = 0
+        for batch_idx in range(len(object_embeddings)):
+
+            batch_embeddings = object_embeddings[batch_idx]
+            batch_indices = frame_matched_indices[batch_idx]
+            negative_embeddings = []
+            positive_embeddings = []
+            positive_embeddings_object_idx = []
+            for seq_id in range(seq_len):
+
+                seq_giou = self.max_giou(pred_boxes[batch_idx][seq_id], [t["boxes"] for t in targets[batch_idx]][seq_id])
+
+                #get the positive embeddings
+                indices_frame = batch_indices[seq_id]
+                positive_embeddings.append(
+                    batch_embeddings[seq_id][indices_frame[0]]
+                )
+                positive_embeddings_object_idx.append(
+                    indices_frame[1]
+                )
+
+
+                #exclude positive samples
+                is_negative_sample = torch.isin(torch.arange(batch_embeddings[seq_id].shape[0], device=object_embeddings.device), indices_frame[0], invert=True)
+                #finding negative embeddings whose boxes who have an IOU below the threshold
+                is_negative_sample = torch.bitwise_and(is_negative_sample, seq_giou < giou_threshold)
+                negative_embeddings_frame = batch_embeddings[seq_id][is_negative_sample]
+
+                if negative_embeddings_frame.shape[0] > sample_num:
+                    #randomly sample sample_num from the negative embeddings for efficiency purposes
+                    negative_sampled_embeddings = negative_embeddings_frame[torch.randperm(negative_embeddings_frame.shape[0])[:sample_num]]
+                else:
+                    negative_sampled_embeddings = negative_embeddings_frame
+
+                negative_embeddings.append(negative_sampled_embeddings)
+
+            negative_embeddings = torch.concat(negative_embeddings, dim=0)
+            negative_embeddings_object_idx = torch.full((negative_embeddings.shape[0],), -1)
+            positive_embeddings = torch.concat(positive_embeddings, dim=0)
+            positive_embeddings_object_idx = torch.concat(positive_embeddings_object_idx, dim=0)
+            
+            object_ids = positive_embeddings_object_idx.unique()
+
+            matching_loss = 0
+            num_positive_matches = 0
+            nonmatching_loss = 0
+            num_hard_negatives = 0
+
+            for object_id in object_ids:
+                embed_id_matches = positive_embeddings[positive_embeddings_object_idx == object_id]
+
+                matching_similarity = F.cosine_similarity(embed_id_matches.unsqueeze(1), embed_id_matches.unsqueeze(0), dim=-1)
+                matching_distance = 0.5*(1-matching_similarity)
+                all_matching_loss += torch.pow(matching_distance,2).sum()
+                all_num_positive_matches += matching_distance.numel()
+
+                embed_id_nonmatches = positive_embeddings[positive_embeddings_object_idx != object_id]
+                embed_id_nonmatch_and_negative = torch.cat((
+                    positive_embeddings[positive_embeddings_object_idx != object_id],
+                    negative_embeddings
+                ))
+
+                nonmatching_similarity = F.cosine_similarity(embed_id_nonmatches.unsqueeze(1), embed_id_nonmatch_and_negative.unsqueeze(0), dim=-1)
+                nonmatching_distance = 0.5*(1-nonmatching_similarity)
+
+                all_nonmatching_loss += torch.pow(torch.clamp(margin - nonmatching_distance, min=0),2).sum()
+
+                #number_hard_negative -- from https://groups.csail.mit.edu/robotics-center/public_papers/Florence19.pdf
+                # only scale the non-matching count by the amount which are truly hard negative, 
+                # aka they are truly close when they shouldn't be (within margin distance).
+                # if samples are actually far apart, they should be scaled less
+                all_num_hard_negatives += torch.sum((margin - nonmatching_distance) > 0)
+
+        contrastive_loss += matching_loss_lambda*all_matching_loss/all_num_positive_matches + \
+                        nonmatching_loss_lambda*all_nonmatching_loss/max(1, all_num_hard_negatives)
+        return contrastive_loss
 
     def _get_source_permutation_idx(self, indices):
         # permute predictions following indices
@@ -2820,7 +2946,7 @@ class DeformableDetrLoss(nn.Module):
         indices, _ = self.matcher(outputs_without_aux, targets)
 
         # Compute the average number of target boxes accross all nodes, for normalization purposes
-        num_boxes = sum(len(t["class_labels"]) for t in targets)
+        num_boxes = sum([sum([len(t["class_labels"]) for t in s]) for s in targets])
         num_boxes = torch.as_tensor(
             [num_boxes], dtype=torch.float, device=next(iter(outputs.values())).device
         )
@@ -2830,21 +2956,56 @@ class DeformableDetrLoss(nn.Module):
         # (Niels) in original implementation, num_boxes is divided by get_world_size()
         num_boxes = torch.clamp(num_boxes, min=1).item()
 
+        seq_len = len(targets[0])
+
         # Compute all the requested losses
         losses = {}
         for loss in self.losses:
-            losses.update(self.get_loss(loss, outputs, targets, indices, num_boxes))
+            for seq_id in range(seq_len):
+                seq_outputs = {}
+
+                seq_outputs["logits"] = outputs["logits"][:, seq_id]
+                seq_outputs["pred_boxes"] = outputs["pred_boxes"][:, seq_id]
+                seq_outputs["object_embeddings"] = outputs["object_embeddings"][:, seq_id]
+
+                seq_targets = list(zip(*targets))[seq_id]
+
+                seq_indices = list(zip(*indices))[seq_id]
+
+                if loss in losses.keys():
+                    losses[loss] += self.get_loss(loss, seq_outputs, seq_targets, seq_indices, num_boxes)
+                else:
+                    losses.update(self.get_loss(loss, seq_outputs, seq_targets, seq_indices, num_boxes))
+
+
+        losses["contrastive"] = self.loss_contrastive(indices, outputs["object_embeddings"], outputs["pred_boxes"], targets)
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if "auxiliary_outputs" in outputs:
             for i, auxiliary_outputs in enumerate(outputs["auxiliary_outputs"]):
                 indices, _ = self.matcher(auxiliary_outputs, targets)
                 for loss in self.losses:
-                    l_dict = self.get_loss(
-                        loss, auxiliary_outputs, targets, indices, num_boxes
-                    )
-                    l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
-                    losses.update(l_dict)
+                    for seq_id in range(seq_len):
+                        seq_outputs = {}
+
+                        seq_outputs["logits"] = auxiliary_outputs["logits"][:, seq_id]
+                        seq_outputs["pred_boxes"] = auxiliary_outputs["pred_boxes"][:, seq_id]
+                        seq_outputs["object_embeddings"] = auxiliary_outputs["object_embeddings"][:, seq_id]
+
+                        seq_targets = list(zip(*targets))[seq_id]
+
+                        seq_indices = list(zip(*indices))[seq_id]
+
+                        l_dict = self.get_loss(
+                            loss, seq_outputs, seq_targets, seq_indices, num_boxes
+                        )
+                        for k,v in l_dict.items():
+                            new_k = k + f"_{i}"
+                            if new_k in losses.keys():
+                                losses[new_k] += v
+                            else:
+                                losses[new_k] = v
+                losses[f"contrastive_{i}"] = self.loss_contrastive(indices, auxiliary_outputs["object_embeddings"], auxiliary_outputs["pred_boxes"], targets)
 
         if "enc_outputs" in outputs:
             enc_outputs = outputs["enc_outputs"]
@@ -2884,13 +3045,16 @@ class DeformableDetrMLPPredictionHead(nn.Module):
         return x
 
 
-class DeformableDetrHungarianMatcher(nn.Module):
+class TemporalDeformableDetrHungarianMatcher(nn.Module):
     """
     This class computes an assignment between the targets and the predictions of the network.
 
-    For efficiency reasons, the targets don't include the no_object. Because of this, in general, there are more
-    predictions than targets. In this case, we do a 1-to-1 matching of the best predictions, while the others are
-    un-matched (and thus treated as non-objects).
+    Step 1: Temporal matching. We loop over each sequence starting from the first frame, and match all predicted objects to objects in trajectory banks.
+    If there are more predicted objects than trajectory bank objects, we add them to the the trajectory bank
+    If there are less predicted objects than trajectory bank objects, we track the leftover trajectory bank objects
+        as "occluded".
+
+    Step 2: Match new predicted objects in each frame to an gt objects
     """
 
     def __init__(
@@ -2898,6 +3062,8 @@ class DeformableDetrHungarianMatcher(nn.Module):
         class_cost: float = 1,
         bbox_cost: float = 1,
         giou_cost: float = 1,
+        track_cost: float = 1,
+        track_confidence_thresh: float = 0.6,
         smoothing=0.0,
     ):
         """
@@ -2917,6 +3083,8 @@ class DeformableDetrHungarianMatcher(nn.Module):
         self.class_cost = class_cost
         self.bbox_cost = bbox_cost
         self.giou_cost = giou_cost
+        self.track_cost = track_cost
+        self.track_confidence_thresh = track_confidence_thresh
         assert (
             class_cost != 0 or bbox_cost != 0 or giou_cost != 0
         ), "All costs of the Matcher can't be 0"
@@ -2930,9 +3098,9 @@ class DeformableDetrHungarianMatcher(nn.Module):
 
         Params:
             outputs: This is a dict that contains at least these entries:
-                 "logits": Tensor of dim [batch_size, num_queries, num_classes] with the classification logits
-                 "pred_boxes": Tensor of dim [batch_size, num_queries, 4] with the predicted box coordinates
-            targets: This is a list of targets (len(targets) = batch_size), where each target is a dict containing:
+                 "logits": Tensor of dim [batch_size, seq_len, num_queries, num_classes] with the classification logits
+                 "pred_boxes": Tensor of dim [batch_size, seq_len, num_queries, 4] with the predicted box coordinates
+            targets: This is a list of targets (len(targets) = batch_size), where each target is a list(len = seq_len) of dicts containing:
                  "class_labels": Tensor of dim [num_target_boxes] (where num_target_boxes is the number of ground-truth
                  objects in the target) containing the class labels "boxes": Tensor of dim [num_target_boxes, 4]
                  containing the target box coordinates
@@ -2944,73 +3112,133 @@ class DeformableDetrHungarianMatcher(nn.Module):
                 - index_j is the indices of the corresponding selected targets (in order)
             For each batch element, it holds: len(index_i) = len(index_j) = min(num_queries, num_target_boxes)
         """
-        bs, num_queries = outputs["logits"].shape[:2]
 
-        # We flatten to compute the cost matrices in a batch
-        out_prob = (
-            outputs["logits"].flatten(0, 1).sigmoid()
-        )  # [batch_size * num_queries, num_classes]
-        out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
+        batch_size, seq_len, num_queries, num_classes = outputs["logits"].shape
 
-        # Also concat the target labels and boxes
-        tgt_ids = torch.cat([v["class_labels"] for v in targets])
-        tgt_bbox = torch.cat([v["boxes"] for v in targets])
+        traj_bank = [[] for batch_idx in range(batch_size)]
 
-        # Compute the classification cost. Contrary to the loss, we don't use the NLL,
-        # but approximate it in 1 - proba[target class].
-        # The 1 is a constant that doesn't change the matching, it can be ommitted.
-        alpha = 0.25
-        gamma = 2.0
-        neg_cost_class = (
-            (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
-        )
-        pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())
-        class_cost = (
-            pos_cost_class[:, tgt_ids] - neg_cost_class[:, tgt_ids]
-        )  # min (1-alpha) * log(1e-8) max alpha * -log(1e-8)
+        frame_matched_indices = []
+        trajectory_matched_indices = []
 
-        # Compute the L1 cost between boxes
-        bbox_cost = torch.cdist(out_bbox, tgt_bbox, p=1)  # min 0 max 4
+        max_giou_costs = []
 
-        # Compute the giou cost between boxes
-        giou_cost = -generalized_box_iou(
-            center_to_corners_format(out_bbox), center_to_corners_format(tgt_bbox)
-        )  # min -1 max 1
+        for seq_id in range(seq_len):
+            #tracking loss
+            out_prob_raw = (
+                outputs["logits"][:, seq_id].sigmoid()
+            )  # [batch_size * num_queries, num_classes]
+            out_bbox = outputs["pred_boxes"][:, seq_id].flatten(0, 1)  # [batch_size * num_queries, 4]
 
-        # Final cost matrix
-        cost_matrix = (
-            self.bbox_cost * bbox_cost
-            + self.class_cost * class_cost
-            + self.giou_cost * giou_cost
-        )
-        cost_matrix = cost_matrix.view(bs, num_queries, -1).cpu()
+            out_prob = out_prob_raw.flatten(0,1)
 
-        if self.smoothing:
-            # If object queries are perfectly matched to gt objects,
-            # class_cost = (1-alpha) * self.bias_epsilon, bbox_cost = 0, and giou_cost = -1.
-            cost_min = (
-                self.class_cost * (1 - alpha) * self.bias_epsilon - self.giou_cost
+            # Also concat the target labels and boxes
+            tgt_ids = torch.cat([v[seq_id]["class_labels"] for v in targets])
+            tgt_bbox = torch.cat([v[seq_id]["boxes"] for v in targets])
+
+            # Compute the classification cost. Contrary to the loss, we don't use the NLL,
+            # but approximate it in 1 - proba[target class].
+            # The 1 is a constant that doesn't change the matching, it can be ommitted.
+            alpha = 0.25
+            gamma = 2.0
+            neg_cost_class = (
+                (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
             )
-            inverse_sigmoid_smoothing = -torch.log(
-                torch.tensor((1.0 / self.smoothing) - 1.0)
-            )
-            cost_matrix = cost_matrix - cost_min + inverse_sigmoid_smoothing
+            pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())
+            class_cost = (
+                pos_cost_class[:, tgt_ids] - neg_cost_class[:, tgt_ids]
+            )  # min (1-alpha) * log(1e-8) max alpha * -log(1e-8)
 
-        sizes = [len(v["boxes"]) for v in targets]
-        indices = [
-            linear_sum_assignment(c[i])
-            for i, c in enumerate(cost_matrix.split(sizes, -1))
-        ]
+            # Compute the L1 cost between boxes
+            bbox_cost = torch.cdist(out_bbox, tgt_bbox, p=1)  # min 0 max 4
 
-        matching_costs = [
-            c[i, indices[i][0], indices[i][1]].to(out_prob.device)
-            for i, c in enumerate(cost_matrix.split(sizes, -1))
-        ]
-        indices = [
-            (
-                torch.as_tensor(i, dtype=torch.int64),
-                torch.as_tensor(j, dtype=torch.int64),
+            # Compute the giou cost between boxes
+            giou_cost = -generalized_box_iou(
+                center_to_corners_format(out_bbox), center_to_corners_format(tgt_bbox)
+            )  # min -1 max 1
+            max_giou_costs.append(torch.max(-giou_cost, dim=-1).values.reshape(batch_size, num_queries))
+
+            # Final cost matrix
+            cost_matrix = (
+                self.bbox_cost * bbox_cost
+                + self.class_cost * class_cost
+                + self.giou_cost * giou_cost
             )
-            for i, j in indices
-        ]
-        return indices, matching_costs
+            cost_matrix = cost_matrix.view(batch_size, num_queries, -1).cpu()
+
+            if self.smoothing:
+                # If object queries are perfectly matched to gt objects,
+                # class_cost = (1-alpha) * self.bias_epsilon, bbox_cost = 0, and giou_cost = -1.
+                cost_min = (
+                    self.class_cost * (1 - alpha) * self.bias_epsilon - self.giou_cost
+                )
+                inverse_sigmoid_smoothing = -torch.log(
+                    torch.tensor((1.0 / self.smoothing) - 1.0)
+                )
+                cost_matrix = cost_matrix - cost_min + inverse_sigmoid_smoothing
+
+            sizes = [len(v[seq_id]["boxes"]) for v in targets]
+            indices = [
+                linear_sum_assignment(c[i])
+                for i, c in enumerate(cost_matrix.split(sizes, -1))
+            ]
+
+            matching_costs = [
+                c[i, indices[i][0], indices[i][1]].to(out_prob.device)
+                for i, c in enumerate(cost_matrix.split(sizes, -1))
+            ]
+            indices = [
+                (
+                    torch.as_tensor(i, dtype=torch.int64, device=out_prob.device),
+                    torch.as_tensor(j, dtype=torch.int64, device=out_prob.device),
+                )
+                for i, j in indices
+            ]
+
+            frame_matched_indices.append(indices)
+            # trajectory_matched_indices.append([])
+            out_prob = out_prob_raw
+
+            # find the objects whose "object" label score is above the threshold
+            # predicted_object_embeddings = outputs["object_embeddings"][seq_id]
+
+        #stack all 
+        max_giou_costs = torch.stack(max_giou_costs, dim=1)
+
+        #frame_matched indices is ordered (seq_len, batch_len, ...), need to reorder it
+        frame_matched_indices = list(zip(*frame_matched_indices))
+
+            # pred_as_object = out_prob[:, 0] > self.track_confidence_thresh
+            # for batch_idx in range(batch_size):
+            #     predicted_object_embeddings = outputs["object_embeddings"][batch_idx, seq_id]
+            #     #select thresholded object embeddings
+            #     predicted_object_embeddings = predicted_object_embeddings[pred_as_object[batch_idx]]
+            #     if len(traj_bank[batch_idx]) == 0: # add all predicted objects to the trajectory bank
+            #         for obj_embedding in outputs["object_embeddings"][batch_idx, seq_id]:
+            #             traj_bank.append([obj_embedding])
+            #     else:
+            #         batch_traj_bank = traj_bank[0]
+            #         # add a number of matches equal to the number of objects in the current frame, such that if there are no similar objects to match to, it can serve as
+            #         # a signal to add the object as a new object
+            #         similarity_matrix = torch.full((len(batch_traj_bank) + predicted_object_embeddings.shape[0], predicted_object_embeddings.shape[0]), 
+            #                                        self.matching_threshold)
+                    
+            #         #performs dot product between all nodes with attached object detections and prior detected objects
+            #         for object_index, object_occurences in enumerate(batch_traj_bank):
+            #             similarity_matrix_across_prior_occurences = torch.einsum("nc,mc->nm", torch.stack(object_occurences), predicted_object_embeddings)
+            #             similarity_matrix[object_index] = similarity_matrix_across_prior_occurences.max(dim=0).values.cpu()
+
+            #         # solve arrangement problem, find a matching between prior objects (+ threshold values) that maximizes the sum of similarity    
+            #         traj_indices, pred_indices = linear_sum_assignment(similarity_matrix.detach(), maximize=True)
+            #         trajectory_matched_indices[-1].append((traj_indices, pred_indices))
+            #         for traj_index, pred_index in zip(traj_indices, pred_indices):
+            #             # object matched with one of the threshold objects, and thus should be added as a new object
+            #             #ensure that if node indices are out of order, we add it to the correct spot in batch_traj_bank
+            #             for new_object_idx in range(traj_index - (len(batch_traj_bank)-1)):
+            #                 batch_traj_bank.append([])
+            #             # object matched with a prior object it, append it to the list of older objects
+            #             else:
+            #                 batch_traj_bank[traj_index].append(predicted_object_embeddings[pred_index])
+        return frame_matched_indices, matching_costs
+
+
+
