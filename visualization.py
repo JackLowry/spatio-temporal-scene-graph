@@ -228,6 +228,19 @@ def draw_edges(edge_labels, ax, cmap, num_objects):
 
         edge_idx += 1
 
+def draw_sequence_boxes(imgs, seq_boxes):
+    plt.close()
+    fig, ax = plt.subplots(1,len(seq_boxes), figsize=(20, 12))
+
+    cmap = colormaps['nipy_spectral']
+    num_objects = max([b.shape[0] for b in seq_boxes])
+    cmap = [cmap(x) for x in np.linspace(0, 1, num_objects)]
+
+    for i, (img, boxes) in enumerate(zip(imgs, seq_boxes)):
+        drawn_img = draw_image(img, boxes, ["" for b in boxes], cmap=cmap)
+        ax[i].imshow(drawn_img)
+
+    return fig
 def draw_graph(img, boxes, obj_labels, edge_labels):
     cmap = colormaps['nipy_spectral']
     cmap = [cmap(x) for x in np.linspace(0, 1, boxes.shape[0])]

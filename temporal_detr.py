@@ -300,7 +300,7 @@ class DeformableDetrFeatureExtractor(DetrFeatureExtractor):
 
         prob = out_logits.sigmoid()
         topk_values, topk_indexes = torch.topk(
-            prob.view(out_logits.shape[0], -1), 100, dim=1
+            prob.view(out_logits.shape[0], -1), 20, dim=1
         )
         scores = topk_values
         topk_boxes = torch.div(topk_indexes, out_logits.shape[2], rounding_mode="trunc")
