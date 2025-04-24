@@ -2780,7 +2780,8 @@ class DeformableDetrLoss(nn.Module):
                 center_to_corners_format(source_boxes),
                 center_to_corners_format(target_boxes),
             )
-
+        if targets.shape[0] == 0:
+            return torch.zeros((boxes.shape[0]), device=boxes.device)
         return loss_giou.max(dim=-1).values
 
     def loss_boxes(self, outputs, targets, indices, num_boxes):
@@ -3152,9 +3153,14 @@ class TemporalDeformableDetrHungarianMatcher(nn.Module):
             bbox_cost = torch.cdist(out_bbox, tgt_bbox, p=1)  # min 0 max 4
 
             # Compute the giou cost between boxes
-            giou_cost = -generalized_box_iou(
-                center_to_corners_format(out_bbox), center_to_corners_format(tgt_bbox)
-            )  # min -1 max 1
+            if tgt_bbox.shape[0] == 0:
+                giou_cost = torch.zeros((out_bbox.shape[0], 1), device=out_bbox.device)
+            else:
+                giou_cost = -generalized_box_iou(
+                    center_to_corners_format(out_bbox), center_to_corners_format(tgt_bbox)
+                )  # min -1 max 1
+
+
             max_giou_costs.append(torch.max(-giou_cost, dim=-1).values.reshape(batch_size, num_queries))
 
             # Final cost matrix
