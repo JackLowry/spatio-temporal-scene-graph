@@ -34,7 +34,7 @@ from util.box_ops import box_cxcywh_to_xyxy
 from omegaconf import DictConfig, OmegaConf
 import hydra
 
-from visualization import draw_graph
+from visualization import draw_graph, draw_sequence_boxes
 
 seed_everything(42, workers=True)
 
@@ -52,28 +52,30 @@ class LogPredictionSamplesCallback(Callback):
 
         # Let's log 1 sample image predictions from the first batch
         if batch_idx == 0:
+            outputs.logits = outputs.logits[batch_idx]
+            outputs.pred_boxes = outputs.pred_boxes[batch_idx]
+            orig_target_sizes = batch["orig_img"][batch_idx].shape[:-1]
+            orig_target_sizes = torch.Tensor(list(orig_target_sizes[1:])).to(outputs.logits.device).repeat(orig_target_sizes[batch_idx], 1)
+            processed_outs = pl_module.feature_extractor.post_process(
+                outputs, orig_target_sizes
+            )
+            imgs = []
+            seq_boxes = []
+            for seq_id in range(outputs.logits.shape[0]):
+                boxes = processed_outs[seq_id]["boxes"]
+                labels = processed_outs[seq_id]["labels"]
+                boxes = boxes[labels == 0]
 
-            seq_id = -1
+                img = batch["orig_img"].clone()
+                img = img[batch_idx, seq_id]
+                # img = (img - img.min())/img.max()
+                img = img*255
+                img = img.to(torch.uint8)
 
-            boxes = outputs.pred_boxes[0, seq_id]
-            labels = torch.nn.functional.softmax(outputs.logits[0, seq_id], dim=-1)
-            labels = torch.argmax(labels, dim=-1)
-            boxes = boxes[labels == 0]
-            boxes = boxes
-            text_labels = ["" for b in boxes] #no label
-            img = batch['pixel_values'][0, seq_id].permute(1,2,0)
+                imgs.append(img.cpu().numpy())
+                seq_boxes.append(boxes.cpu().numpy())
 
-            boxes[:, [0, 2]] *= img.shape[0]
-            boxes[:, [1, 3]] *= img.shape[1]
-
-            boxes = box_cxcywh_to_xyxy(boxes)
-
-            img = img.clone()
-            img = (img - img.min())/img.max()
-            img = img*255
-            img = img.to(torch.uint8)
-
-            img = draw_graph(img.cpu().numpy(), boxes.cpu().numpy(), text_labels, None)
+            img = draw_sequence_boxes(imgs, seq_boxes)
 
             # Option 1: log images with `WandbLogger.log_image`
             self.logger.log_metrics({"pred_boxes": img})
