@@ -23,7 +23,8 @@ from data.isaac_detr import IsaacLabDetrDataset
 
 from data.temporal_isaac_detr import TemporalIsaacLabDetrDataset
 from egtr.lib.fpn import box_utils
-from temporal_detr import (
+from egtr.lib.pytorch_misc import argsort_desc, intersect_2d
+from temporal_egtr import (
     DeformableDetrConfig,
     DeformableDetrFeatureExtractor,
     DeformableDetrFeatureExtractorWithAugmentor,
@@ -34,7 +35,7 @@ from util.box_ops import box_cxcywh_to_xyxy
 from omegaconf import DictConfig, OmegaConf
 import hydra
 
-from visualization import draw_graph, draw_sequence_boxes
+from visualization import draw_graph, draw_sequence_boxes, draw_sequence_graphs
 
 seed_everything(42, workers=True)
 
@@ -52,6 +53,12 @@ class LogPredictionSamplesCallback(Callback):
 
         # Let's log 1 sample image predictions from the first batch
         if batch_idx == 0:
+
+            # pl_module.model.sequence_matcher(node_latents.reshape(batch_size, seq_len, num_objects, -1), 
+            #             edge_latents.reshape(batch_size, seq_len, num_edges, -1),
+            #             node_network_mask.reshape(batch_size, seq_len, num_objects),
+            #             edge_idx_to_node_idxs.reshape(batch_size, seq_len, num_edges, -1))
+            
             outputs.logits = outputs.logits[batch_idx]
             outputs.pred_boxes = outputs.pred_boxes[batch_idx]
             orig_target_sizes = batch["orig_img"][batch_idx].shape[:-1]
@@ -59,8 +66,12 @@ class LogPredictionSamplesCallback(Callback):
             processed_outs = pl_module.feature_extractor.post_process(
                 outputs, orig_target_sizes
             )
+
+            
+
             imgs = []
             seq_boxes = []
+            seq_edge_matches =  []
             for seq_id in range(outputs.logits.shape[0]):
                 boxes = processed_outs[seq_id]["boxes"]
                 labels = processed_outs[seq_id]["labels"]
@@ -75,7 +86,46 @@ class LogPredictionSamplesCallback(Callback):
                 imgs.append(img.cpu().numpy())
                 seq_boxes.append(boxes.cpu().numpy())
 
-            img = draw_sequence_boxes(imgs, seq_boxes)
+                pred_logits = outputs["logits"][seq_id]
+                obj_scores, pred_classes = torch.max(
+                    pred_logits.softmax(-1), -1
+                )
+                sub_ob_scores = torch.outer(obj_scores, obj_scores)
+                sub_ob_scores[
+                    torch.arange(pred_logits.size(0)), torch.arange(pred_logits.size(0))
+                ] = 0.0  # prevent self-connection
+
+
+                pred_rel = torch.clamp(outputs["pred_rel"][batch_idx, seq_id], 0.0, 1.0)
+                pred_connectivity = torch.clamp(outputs["pred_connectivity"][batch_idx, seq_id], 0.0, 1.0)
+                pred_rel = torch.mul(pred_rel, pred_connectivity)
+            
+                triplet_scores = torch.mul(pred_rel, sub_ob_scores.unsqueeze(-1))
+                pred_rel_inds = argsort_desc(triplet_scores.cpu().clone().numpy())[
+                    :100, :
+                ]  # [pred_rels, 3(s,o,p)]
+                                
+                rel_scores = (
+                    pred_rel.cpu()
+                    .clone()
+                    .numpy()[pred_rel_inds[:, 0], pred_rel_inds[:, 1], pred_rel_inds[:, 2]]
+                )  # [pred_rels]
+                score_thresholds = [0.1, 0.25, 0.5, 0.75]
+                target_rels = batch["labels"][batch_idx][seq_id]["rel"]
+                num_threshold_labels = []
+                num_matching_labels = []
+                for thresh in score_thresholds:
+                    pred_rel_inds_thresh = pred_rel_inds[rel_scores > thresh]
+                    if len(target_rels) == 0 or len(pred_rel_inds_thresh) == 0:
+                        num_matches = 0
+                    else:
+                        num_matches = intersect_2d(pred_rel_inds_thresh, target_rels.cpu().numpy()).any(1).sum()
+
+                    num_threshold_labels.append(pred_rel_inds_thresh.shape[0])
+                    num_matching_labels.append(num_matches)
+                seq_edge_matches.append((num_threshold_labels, num_matching_labels, score_thresholds))
+
+            img = draw_sequence_graphs(imgs, seq_boxes, seq_edge_matches)
 
             # Option 1: log images with `WandbLogger.log_image`
             self.logger.log_metrics({"pred_boxes": img})
@@ -115,36 +165,31 @@ def collate_fn(batch, feature_extractor):
 class TemporalDetr(pl.LightningModule):
     def __init__(
         self,
-        backbone_dirpath,
-        auxiliary_loss,
-        lr,
-        lr_backbone,
-        weight_decay,
         main_trained,
         id2label,
-        num_queries,
         architecture,
-        ce_loss_coefficient,
         feature_extractor,
+        num_rel_labels,
+        fg_matrix,
+        args
     ):
         super().__init__()
         # replace COCO classification head with custom head
         config = DeformableDetrConfig.from_pretrained(architecture)
-        config.architecture = architecture
-        config.auxiliary_loss = auxiliary_loss
+        for k, v in args.items():
+            setattr(config, k, v)
+        config.num_rel_labels = num_rel_labels
         config.num_labels = max(id2label.keys()) + 1
-        config.num_queries = num_queries
-        config.ce_loss_coefficient = ce_loss_coefficient
         config.output_attention_states = False
-        self.model = TemporalDeformableDetrForObjectDetection(config=config)
+        self.model = TemporalDeformableDetrForObjectDetection(config=config, fg_matrix=fg_matrix)
         self.model.model.backbone.load_state_dict(
-            torch.load(f"{backbone_dirpath}/{config.backbone}.pt")
+            torch.load(f"{config.backbone_dirpath}/{config.backbone}.pt")
         )
 
         # see https://github.com/PyTorchLightning/pytorch-lightning/pull/1896
-        self.lr = lr
-        self.lr_backbone = lr_backbone
-        self.weight_decay = weight_decay
+        self.lr = config.lr
+        self.lr_backbone = config.lr_backbone
+        self.weight_decay = config.weight_decay
         self.feature_extractor = feature_extractor
         if main_trained:
             state_dict = torch.load(main_trained, map_location="cpu")["state_dict"]
@@ -153,23 +198,33 @@ class TemporalDetr(pl.LightningModule):
             self.model.load_state_dict(state_dict, strict=False)
 
     def forward(self, pixel_values, pixel_mask):
-        outputs = self.model(pixel_values=pixel_values, pixel_mask=pixel_mask)
+        outputs = self.model(
+            pixel_values=pixel_values,
+            pixel_mask=pixel_mask,
+            output_attentions=False,
+            output_attention_states=True,
+            output_hidden_states=True,
+        )
         return outputs
 
+
     def common_step(self, batch, batch_idx, ret_outputs=False):
-        
         pixel_values = batch["pixel_values"]
         pixel_mask = batch["pixel_mask"]
         labels = batch["labels"]
 
         outputs = self.model(
-            pixel_values=pixel_values, pixel_mask=pixel_mask, labels=labels
+            pixel_values=pixel_values,
+            pixel_mask=pixel_mask,
+            labels=labels,
+            output_attentions=False,
+            output_attention_states=True,
+            output_hidden_states=True,
         )
-
-        if ret_outputs:
-            return outputs
         loss = outputs.loss
         loss_dict = outputs.loss_dict
+        if ret_outputs:
+            return outputs
         del outputs
         return loss, loss_dict
 
@@ -186,7 +241,6 @@ class TemporalDetr(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-
         outputs = self.common_step(batch, batch_idx, ret_outputs=True)
         loss = outputs.loss        
         outputs.loss_dict["loss"] = loss
@@ -270,14 +324,13 @@ def main(config: DictConfig) -> None:
     # Path
     args = hydra.utils.instantiate(config)
 
-
     # Feature extractor
     feature_extractor = DeformableDetrFeatureExtractor.from_pretrained(
-        args.architecture, size=800, max_size=1333
+        args.architecture, size=args.img_size, max_size=args.max_size
     )
     feature_extractor_train = (
         DeformableDetrFeatureExtractorWithAugmentor.from_pretrained(
-            args.architecture, size=800, max_size=1333
+            args.architecture, size=args.img_size, max_size=args.max_size
         )
     )
 
@@ -296,6 +349,8 @@ def main(config: DictConfig) -> None:
     train_size = int(data_len*.9)
     train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, data_len - train_size])
 
+    fg_matrix = TemporalIsaacLabDetrDataset.get_statistics(train_dataset)
+
     id2label = {0: "Object", 1: "No Object"}
     print("Number of training examples:", len(train_dataset))
     print("Number of validation examples:", len(val_dataset))
@@ -303,7 +358,7 @@ def main(config: DictConfig) -> None:
     # Dataloader
     train_dataloader = DataLoader(
         train_dataset,
-        collate_fn=lambda x: collate_fn(x, feature_extractor),
+        collate_fn=lambda x: collate_fn(x, feature_extractor_train),
         batch_size=args.batch_size,
         pin_memory=True,
         num_workers=args.num_workers,
@@ -344,17 +399,13 @@ def main(config: DictConfig) -> None:
 
     # Module
     module = TemporalDetr(
-        backbone_dirpath=args.backbone_dirpath,
-        auxiliary_loss=args.auxiliary_loss,
-        lr=args.lr,
-        lr_backbone=args.lr_backbone,
-        weight_decay=args.weight_decay,
         main_trained="",
         id2label=id2label,
-        num_queries=args.num_queries,
         architecture=args.architecture,
-        ce_loss_coefficient=args.ce_loss_coefficient,
         feature_extractor=feature_extractor,
+        num_rel_labels=dataset.num_relationship_labels,
+        fg_matrix=fg_matrix,
+        args=args,
     )
 
     module.train_dataloader_obj = train_dataloader
@@ -391,7 +442,7 @@ def main(config: DictConfig) -> None:
             gpus=args.gpus,
             max_epochs=args.max_epochs,
             gradient_clip_val=args.gradient_clip_val,
-            strategy=DDPStrategy(find_unused_parameters=False),
+            strategy=DDPStrategy(find_unused_parameters=True),
             callbacks=[checkpoint_callback, early_stop_callback, log_pred_callback],
             accumulate_grad_batches=args.accumulate,
             log_every_n_steps=10,

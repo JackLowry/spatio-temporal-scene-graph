@@ -241,6 +241,25 @@ def draw_sequence_boxes(imgs, seq_boxes):
         ax[i].imshow(drawn_img)
 
     return fig
+
+def draw_sequence_graphs(imgs, seq_boxes, seq_relationship_matches):
+    plt.close()
+    fig, ax = plt.subplots(2,len(seq_boxes), figsize=(20, 12))
+
+    cmap = colormaps['nipy_spectral']
+    num_objects = max([b.shape[0] for b in seq_boxes])
+    cmap = [cmap(x) for x in np.linspace(0, 1, num_objects)]
+
+    for i, (img, boxes, (num_thresh_relations, num_match_relations, threshes)) in enumerate(zip(imgs, seq_boxes, seq_relationship_matches)):
+        drawn_img = draw_image(img, boxes, ["" for b in boxes], cmap=cmap)
+        ax[0][i].imshow(drawn_img)
+        ax[1][i].bar(np.arange(len(threshes)), num_thresh_relations, width=0.5, label="Number of predicted relations")
+        ax[1][i].bar(np.arange(len(threshes)), num_match_relations, width=0.5, label="Number of matching predicted relations")
+        ax[1][i].set_xticklabels(threshes)
+        # ax[1][i].legend()
+    fig.legend()
+    return fig
+
 def draw_graph(img, boxes, obj_labels, edge_labels):
     cmap = colormaps['nipy_spectral']
     cmap = [cmap(x) for x in np.linspace(0, 1, boxes.shape[0])]

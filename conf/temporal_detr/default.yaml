@@ -11,8 +11,12 @@ num_queries: 50
 ce_loss_coefficient: 2.0
 contrastive_loss_coefficient: 1.0
 
+# Dataset
+img_size: 256
+max_size: 256
+
 # Training
-batch_size: 1
+batch_size: 2
 accumulate: 1
 gpus: 1
 max_epochs: 10
@@ -27,12 +31,23 @@ memo: ""
 version: 0
 patience: 15
 finetune: False
-
+use_freq_bias: True
+freq_bias_eps: 1e-12
+use_log_softmax: False
+logit_adjustment: False
+smoothing: 1e-14
+rel_sample_negatives: 80
+rel_sample_nonmatching: 80
+rel_sample_negatives_largest: True
+rel_sample_nonmatching_largest: True
+num_rel_labels: 6
 # Evaluation
 skip_train: False
 split: "val"
 eval_batch_size: 1
 eval_when_train_end: True
+
+sequence_matching_threshold: 0.2
 
 # Speed up
 num_workers: 1

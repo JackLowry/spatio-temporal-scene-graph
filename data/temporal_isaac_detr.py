@@ -8,6 +8,7 @@ from torch.utils.data import Dataset
 import numpy as np
 import torchvision
 from PIL import Image
+import tqdm
 
 from util.box_ops import box_xyxy_to_cxcywh
 
@@ -15,8 +16,9 @@ class TemporalIsaacLabDetrDataset(Dataset):
  
     def __init__(self, root_dir,
                  feature_extractor, 
-                 scale_factor=1, 
-                 transform=None):
+                 scale_factor=1.0, 
+                 transform=None,
+                 num_object_queries=50):
         """
         Arguments:
             root_dir (string): Directory with all the images.
@@ -29,7 +31,7 @@ class TemporalIsaacLabDetrDataset(Dataset):
         self.root_dir = root_dir
         self.transform = transform
 
-        self.num_scenes = len(os.listdir(root_dir)) - 1
+        self.num_scenes = len(os.listdir(root_dir)) - 2
         self.num_objects = len(os.listdir(os.path.join(root_dir, '0')))
 
         with open(os.path.join(root_dir, "metadata.json"), 'r') as f:
@@ -39,14 +41,23 @@ class TemporalIsaacLabDetrDataset(Dataset):
             v['id']:k for k,v in self.metadata["node_data"].items()
         }
 
+        # self.metadata['edge_name_to_id'] = {
+        #     "no_relation": 0,
+        #     "in_front_of": 1,
+        #     "behind": 2,
+        #     "on_top_of": 3,
+        #     "below": 4,
+        #     "right_of": 5,
+        #     "left_of": 6,
+        # }
+
         self.metadata['edge_name_to_id'] = {
-            "no_relation": 0,
-            "in_front_of": 1,
-            "behind": 2,
-            "on_top_of": 3,
-            "below": 4,
-            "right_of": 5,
-            "left_of": 6,
+            "in_front_of": 0,
+            "behind": 1,
+            "on_top_of": 2,
+            "below": 3,
+            "right_of": 4,
+            "left_of": 5,
         }
         self.metadata["edge_id_to_name"] = {
             v:k for k,v in self.metadata["edge_name_to_id"].items()
@@ -57,12 +68,19 @@ class TemporalIsaacLabDetrDataset(Dataset):
         self.no_object_label = 0
         self.no_relationship_label = 0
         self.num_object_labels = len(list(self.metadata["node_data"].keys()))
-        self.num_relationship_labels = 7#len(list(self.metadata["edge_data"].keys()))
+        self.num_relationship_labels = 6#len(list(self.metadata["edge_data"].keys()))
 
         self.scale_factor = scale_factor
+        self.num_object_queries = num_object_queries
 
     def __len__(self):
         return self.num_scenes
+    
+    def load_idx(self, scene_idx, object_idx):
+        item_path = os.path.join(self.root_dir, str(scene_idx), f"t_{object_idx}_cpu.pkl")
+        with open(item_path, 'rb') as f:
+            sample = torch.load(f)
+        return sample
 
     def __getitem__(self, scene_idx):
 
@@ -71,9 +89,7 @@ class TemporalIsaacLabDetrDataset(Dataset):
         sequence_orig_img = []
 
         for object_idx in range(self.num_objects):
-            item_path = os.path.join(self.root_dir, str(scene_idx), f"t_{object_idx}_cpu.pkl")
-            with open(item_path, 'rb') as f:
-                sample = torch.load(f)#, map_location='cpu')
+            sample = self.load_idx(scene_idx, object_idx)
 
             image = sample["images"]["rgb"][0].to(torch.float32).cpu()/255
             
@@ -115,8 +131,6 @@ class TemporalIsaacLabDetrDataset(Dataset):
                 object_to_training_idxs[object] = training_idx_counter
                 training_idx_counter += 1 
 
-
-
             annotations = []
 
             idx = scene_idx*self.num_objects + object_idx
@@ -132,15 +146,31 @@ class TemporalIsaacLabDetrDataset(Dataset):
                 } 
                 annotations.append(annotation)
 
+
+            relationships = []
+            for relation_tuple in graph["edges"].keys():
+                (subject_name, object_name) = relation_tuple
+                relation_id = graph["edges"][relation_tuple]['relation_id']
+                if relation_id == 0: #ignore no_relation, we don't want to predict these
+                    continue
+                relation_id = relation_id - 1
+                subject_id = object_to_training_idxs[subject_name]
+                object_id  = object_to_training_idxs[object_name]
+                relationships.append(torch.Tensor([subject_id, object_id, relation_id]))
+
             target = {
                 "image_id": idx,
-                "annotations": annotations
+                "annotations": annotations,
             }
             encoding = self.feature_extractor(
                 image, target, return_tensors="pt"
             )
             pixel_values = encoding["pixel_values"].squeeze()  # remove batch dimension
             target = encoding["labels"][0]  # remove batch dimension
+            if len(relationships) == 0:
+                target["rel"] = []
+            else:
+                target["rel"] = torch.stack(relationships)
 
             sequence_pixel_values.append(pixel_values)
             sequence_target.append(target)
@@ -157,3 +187,42 @@ class TemporalIsaacLabDetrDataset(Dataset):
         #     "edge_network_mask": torch.stack(sequence_edge_network_mask)
         # }
         return (sequence_pixel_values, sequence_orig_img), sequence_target
+
+    @staticmethod
+    def get_statistics(data_subset: torch.utils.data.dataset.Subset, cache_filename="train_stats.npy", force_calculate=False):
+        dataset = data_subset.dataset
+        cache_path = os.path.join(dataset.root_dir, cache_filename)
+        if not force_calculate and os.path.isfile(cache_path):
+            return np.load(cache_path)
+        
+        fg_matrix = np.zeros(
+            (
+                dataset.num_object_labels,
+                dataset.num_object_labels,
+                dataset.num_relationship_labels,
+            ),
+            dtype=np.int64,
+        )
+
+        # rel = train_data.rel
+        for scene_idx in tqdm.tqdm(data_subset.indices):
+            for object_idx in range(dataset.num_objects):
+                sample = dataset.load_idx(scene_idx, object_idx)
+
+                graph = sample["graph"][0]
+
+                for relation_tuple in graph["edges"].keys():
+                    (subject_name, object_name) = relation_tuple
+                    relation_id = graph["edges"][relation_tuple]['relation_id']
+                    if relation_id == 0: #ignore no_relation, we don't want to predict these
+                        continue
+                    relation_id = relation_id - 1
+                    subject_id = dataset.metadata["node_data"][graph["nodes"][subject_name]["class_name"]]["id"]
+                    object_id  = dataset.metadata["node_data"][graph["nodes"][object_name]["class_name"]]["id"]
+                    fg_matrix[subject_id, object_id, relation_id] += 1
+
+        np.save(cache_path, fg_matrix)
+
+        return fg_matrix
+    
+    
